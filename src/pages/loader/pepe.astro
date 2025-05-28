@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizador de Voz con Partículas (Vanilla JS)</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #1a1a1a;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+        .visualizer-container {
+            width: 350px;
+            height: 350px;
+            position: relative;
+            margin-bottom: 25px;
+        }
+        #voiceVisualizer {
+            display: block;
+            background-color: transparent;
+        }
+        #startButton {
+            padding: 12px 25px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s, transform 0.1s;
+            font-weight: 500;
+        }
+        #startButton:hover {
+            background-color: #45a049;
+        }
+        #startButton:active {
+            transform: scale(0.98);
+        }
+        #startButton:disabled {
+            background-color: #777;
+            cursor: not-allowed;
+        }
+        .instructions {
+            font-size: 14px;
+            color: #aaa;
+            margin-top: 15px;
+            text-align: center;
+        }
+        .footer-text {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            font-size: 10px;
+            color: #777;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+        }
+    </style>
+</head>
+<body>
+    <div class="visualizer-container">
+        <canvas id="voiceVisualizer"></canvas>
+    </div>
+    <button id="startButton">Iniciar Demo de Voz</button>
+    <p class="instructions">Permite el acceso al micrófono.<br>Las partículas formarán círculos que reaccionan a tu voz.</p>
+
+    <div class="footer-text">PARTICLE MINIMAL VOICE</div>
+
+    <script is:inline>
+        const canvas = document.getElementById('voiceVisualizer');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const visualizerContainer = document.querySelector('.visualizer-container');
+
+        canvas.width = visualizerContainer.offsetWidth;
+        canvas.height = visualizerContainer.offsetHeight;
+
+        let audioContext;
+        let analyser;
+        let dataArray;
+        let animationFrameId;
+
+        let canvasWidth = canvas.width;
+        let canvasHeight = canvas.height;
+        let centerX = canvasWidth / 2;
+        let centerY = canvasHeight / 2;
+
+        const numVirtualLines = 5;
+        const particlesPerLine = 80;
+        const totalParticles = numVirtualLines * particlesPerLine;
+        
+        let baseRadius = Math.min(canvasWidth, canvasHeight) * 0.25;
+        // --- Parámetros de Tamaño de Partícula ---
+        const baseParticleSize = 1.3; 
+        const particleSizeVolumeMultiplier = 1.5; // Cuánto crece la partícula con el volumen
+        const maxParticleSizeIncrease = 1.2;      // Aumento máximo sobre el tamaño base
+        
+        const particleColor = '#e0e0e0';
+        const easeFactor = 0.08; 
+
+        const staticDeformParams = [
+            { freq: 3.5, amp: 3.5, speed: 0.0006 },
+            { freq: 5.8, amp: 3.0, speed: 0.0004 }
+        ];
+        const volumeDeformParams = [
+            { freq: 4.0, amp: 30, speed: 0.00095 },
+            { freq: 7.2, amp: 25, speed: 0.00075 }
+        ];
+        
+        const lineSpacingVariation = 2.5;
+
+        let particles = [];
+        let smoothedVolume = 0;
+        const smoothingFactor = 0.12; 
+
+        let time = 0;
+
+        // --- Parámetros de Rotación Individual de Partículas ---
+        const INDIVIDUAL_ROTATION_ENABLED = true;
+        const angularAccelerationEase = 0.015;
+        const baseMaxTargetAngularAcceleration = 0.000015; 
+        const baseMaxAngularVelocity = 0.003;          
+        const baseAngularDamping = 0.985;
+        const volumeMultiplierForAngularAcceleration = 15.0; 
+        const volumeMultiplierForMaxAngularVelocity = 10.0;  
+        const minTimeForAccelerationChange = 180; 
+        const randomTimeForAccelerationChange = 350;
+
+        // --- Parámetros de Rotación Global del Sistema ---
+        const GLOBAL_ROTATION_ENABLED = true;
+        let globalRotationAngle = 0;
+        let globalAngularVelocity = 0;
+        const globalAngularVelocityVolumeMultiplier = 0.015; // Cuánto acelera la rotación global con la voz
+        const globalAngularDamping = 0.96; // Frenado más fuerte para que no gire indefinidamente rápido
+
+        function createParticle(index) {
+            const virtualLineIndex = Math.floor(index / particlesPerLine);
+            const angle = (index % particlesPerLine / particlesPerLine) * Math.PI * 2;
+            const radiusOffsetForLine = (virtualLineIndex - (numVirtualLines -1) / 2) * lineSpacingVariation;
+            const reactivity = 0.7 + Math.random(); 
+
+            return {
+                id: index,
+                x: centerX + (Math.random() - 0.5) * 50,
+                y: centerY + (Math.random() - 0.5) * 50,
+                targetX: centerX, 
+                targetY: centerY,
+                baseAngle: angle, // Ángulo original de la partícula en el círculo
+                virtualLineIndex: virtualLineIndex,
+                radiusOffset: radiusOffsetForLine,
+                phaseSeed: Math.random() * Math.PI * 2,
+                reactivityFactor: reactivity,
+                // Para rotación individual
+                currentAngleOffset: (Math.random() - 0.5) * 0.1,
+                angularVelocity: (Math.random() - 0.5) * 0.0005,
+                angularAcceleration: 0,
+                targetAngularAcceleration: (Math.random() - 0.5) * 2 * baseMaxTargetAngularAcceleration * 0.5,
+                timeToChangeAccelerationTarget: time + minTimeForAccelerationChange + Math.floor(Math.random() * randomTimeForAccelerationChange)
+            };
+        }
+
+        function initParticles() {
+            particles = [];
+            for (let i = 0; i < totalParticles; i++) {
+                particles.push(createParticle(i));
+            }
+        }
+
+        function setupAudioNodes() {
+             return new Promise((resolve, reject) => {
+                navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+                    .then((stream) => {
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        analyser = audioContext.createAnalyser();
+                        const microphone = audioContext.createMediaStreamSource(stream);
+                        
+                        analyser.fftSize = 256; 
+                        analyser.smoothingTimeConstant = 0.5; 
+                        const bufferLength = analyser.frequencyBinCount;
+                        dataArray = new Uint8Array(bufferLength);
+
+                        microphone.connect(analyser);
+                        resolve();
+                    })
+                    .catch((err) => {
+                        console.error("Error al acceder al micrófono:", err);
+                        alert("No se pudo acceder al micrófono.");
+                        startButton.textContent = 'Error de Micrófono';
+                        startButton.disabled = false;
+                        reject(err);
+                    });
+            });
+        }
+
+        function updateAndDrawParticles(currentSmoothedVolume) {
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+            ctx.fillStyle = particleColor;
+
+            const volumeFactor = Math.max(0, Math.min(currentSmoothedVolume, 1.0));
+
+            // --- Actualizar Rotación Global ---
+            if (GLOBAL_ROTATION_ENABLED) {
+                // La aceleración es proporcional al volumen (y su reactividad)
+                let desiredGlobalVelocity = volumeFactor * globalAngularVelocityVolumeMultiplier;
+                // Suavizar el cambio hacia la velocidad deseada
+                globalAngularVelocity += (desiredGlobalVelocity - globalAngularVelocity) * 0.1; // Ease para velocidad global
+                globalAngularVelocity *= globalAngularDamping; // Aplicar freno
+                globalRotationAngle += globalAngularVelocity;
+            }
+
+            particles.forEach(p => {
+                const particleReactivity = p.reactivityFactor;
+
+                // --- Calcular Tamaño de Partícula Dinámico ---
+                const particleSizeIncrease = volumeFactor * particleSizeVolumeMultiplier * particleReactivity;
+                const currentParticleSize = baseParticleSize + Math.min(particleSizeIncrease, maxParticleSizeIncrease);
+
+                // --- Rotación Individual ---
+                let individualAngleOffset = p.currentAngleOffset;
+                if (INDIVIDUAL_ROTATION_ENABLED) {
+                    const dynamicMaxTargetAngularAcceleration = baseMaxTargetAngularAcceleration * (1 + volumeFactor * volumeMultiplierForAngularAcceleration * particleReactivity);
+                    const dynamicMaxAngularVelocity = baseMaxAngularVelocity * (1 + volumeFactor * volumeMultiplierForMaxAngularVelocity * particleReactivity);
+
+                    if (time >= p.timeToChangeAccelerationTarget) {
+                        p.targetAngularAcceleration = (Math.random() - 0.5) * 2 * dynamicMaxTargetAngularAcceleration;
+                        p.timeToChangeAccelerationTarget = time + minTimeForAccelerationChange + Math.floor(Math.random() * randomTimeForAccelerationChange);
+                    }
+                    p.angularAcceleration += (p.targetAngularAcceleration - p.angularAcceleration) * angularAccelerationEase;
+                    p.angularVelocity += p.angularAcceleration;
+                    p.angularVelocity *= baseAngularDamping;
+                    p.angularVelocity = Math.max(-dynamicMaxAngularVelocity, Math.min(dynamicMaxAngularVelocity, p.angularVelocity));
+                    p.currentAngleOffset += p.angularVelocity;
+                    individualAngleOffset = p.currentAngleOffset;
+                }
+                
+                // --- Calcular Ángulo Final de la Partícula ---
+                // El ángulo base se combina con la rotación global, y luego con la rotación individual
+                let particleAngle = p.baseAngle + globalRotationAngle + individualAngleOffset;
+                
+                const cosA = Math.cos(particleAngle);
+                const sinA = Math.sin(particleAngle);
+
+                // --- Deformaciones Radiales ---
+                let radiusDeformation = 0;
+                staticDeformParams.forEach((param, idx) => {
+                    const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.7) + time * param.speed;
+                    radiusDeformation += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                });
+
+                let volumeSpecificDeformationAmount = 0;
+                if (currentSmoothedVolume > 0.02) {
+                    volumeDeformParams.forEach((param, idx) => {
+                        const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.9) + time * param.speed * (1 + currentSmoothedVolume * 0.8);
+                        volumeSpecificDeformationAmount += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                    });
+                    radiusDeformation += currentSmoothedVolume * volumeSpecificDeformationAmount * particleReactivity;
+                }
+                
+                const currentParticleBaseRadius = baseRadius + p.radiusOffset;
+                const targetRadius = currentParticleBaseRadius + radiusDeformation;
+                
+                p.targetX = centerX + targetRadius * cosA;
+                p.targetY = centerY + targetRadius * sinA;
+
+                p.x += (p.targetX - p.x) * easeFactor;
+                p.y += (p.targetY - p.y) * easeFactor;
+
+                // Dibujar la partícula con su tamaño dinámico
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, currentParticleSize, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function animate() {
+            if (!audioContext) {
+                updateAndDrawParticles(0); 
+                animationFrameId = requestAnimationFrame(animate);
+                time++;
+                return;
+            }
+             if (!analyser || audioContext.state === 'suspended') {
+                 animationFrameId = requestAnimationFrame(animate);
+                 smoothedVolume = Math.max(0, smoothedVolume * 0.96); 
+                 globalAngularVelocity *= globalAngularDamping; // Asegurar que la rotación global también frene
+                 updateAndDrawParticles(smoothedVolume); 
+                 time++;
+                 return;
+            }
+
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            const relevantBins = Math.floor(dataArray.length * 0.35);
+            for (let i = 0; i < relevantBins; i++) {
+                sum += dataArray[i];
+            }
+            let averageVolume = relevantBins > 0 ? sum / relevantBins : 0;
+            
+            let normalizedVolume = Math.min(averageVolume / 128, 1.5); 
+            normalizedVolume = Math.pow(normalizedVolume, 0.80); 
+            normalizedVolume = Math.max(0, normalizedVolume);
+
+            smoothedVolume = smoothedVolume * (1 - smoothingFactor) + normalizedVolume * smoothingFactor;
+            smoothedVolume = Math.min(smoothedVolume, 1.5); 
+            
+            updateAndDrawParticles(smoothedVolume);
+            
+            time++;
+            animationFrameId = requestAnimationFrame(animate);
+        }
+        
+        startButton.addEventListener('click', () => {
+            if (audioContext && audioContext.state === 'running') {
+                 audioContext.suspend().then(() => {
+                    startButton.textContent = 'Reanudar Demo';
+                    startButton.style.backgroundColor = "#4CAF50";
+                });
+            } else if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    startButton.textContent = 'Demo Activa';
+                    startButton.style.backgroundColor = "#f44336";
+                });
+            } else if (!audioContext) {
+                startButton.disabled = true;
+                startButton.textContent = 'Iniciando...';
+                initParticles(); 
+                setupAudioNodes()
+                    .then(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId); 
+                        time = 0; 
+                        smoothedVolume = 0; 
+                        globalRotationAngle = 0; // Reiniciar rotación global
+                        globalAngularVelocity = 0;
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.textContent = 'Demo Activa';
+                        startButton.style.backgroundColor = "#f44336";
+                        startButton.disabled = false;
+                    })
+                    .catch(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                        initParticles(); 
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.disabled = false; 
+                    });
+            }
+        });
+
+        initParticles();
+        animationFrameId = requestAnimationFrame(animate);
+
+        window.addEventListener('resize', () => {
+            canvas.width = visualizerContainer.offsetWidth;
+            canvas.height = visualizerContainer.offsetHeight;
+            
+            canvasWidth = canvas.width;
+            canvasHeight = canvas.height;
+            centerX = canvasWidth / 2;
+            centerY = canvasHeight / 2;
+            baseRadius = Math.min(canvasWidth, canvasHeight) * 0.25;
+        });
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reactor de Voz con Partículas</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #0c0c0f; /* Un negro más profundo */
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+        .visualizer-container {
+            width: 380px; /* Un poco más grande */
+            height: 380px;
+            position: relative;
+            margin-bottom: 25px;
+        }
+        #voiceVisualizer {
+            display: block;
+            background-color: transparent;
+        }
+        #startButton {
+            padding: 14px 30px;
+            font-size: 18px;
+            cursor: pointer;
+            background-color: #c83241; /* Rojo más intenso */
+            color: white;
+            border: none;
+            border-radius: 7px;
+            transition: background-color 0.3s, transform 0.1s;
+            font-weight: 600;
+            box-shadow: 0 0 15px rgba(200, 50, 65, 0.5);
+        }
+        #startButton:hover {
+            background-color: #e04250;
+            box-shadow: 0 0 25px rgba(224, 66, 80, 0.7);
+        }
+        #startButton:active {
+            transform: scale(0.97);
+        }
+        #startButton:disabled {
+            background-color: #555;
+            box-shadow: none;
+            cursor: not-allowed;
+        }
+        .instructions {
+            font-size: 14px;
+            color: #999;
+            margin-top: 15px;
+            text-align: center;
+        }
+        .footer-text {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            font-size: 11px;
+            color: #555;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+            letter-spacing: 2px;
+        }
+    </style>
+</head>
+<body>
+    <div class="visualizer-container">
+        <canvas id="voiceVisualizer"></canvas>
+    </div>
+    <button id="startButton">Activar Reactor</button>
+    <p class="instructions">Permite el acceso al micrófono.<br>El reactor de partículas responderá a tu voz.</p>
+
+    <div class="footer-text">VOICE CORE REACTOR</div>
+
+    <script is:inline>
+        const canvas = document.getElementById('voiceVisualizer');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const visualizerContainer = document.querySelector('.visualizer-container');
+
+        canvas.width = visualizerContainer.offsetWidth;
+        canvas.height = visualizerContainer.offsetHeight;
+
+        let audioContext;
+        let analyser;
+        let dataArray;
+        let animationFrameId;
+
+        let canvasWidth = canvas.width;
+        let canvasHeight = canvas.height;
+        let centerX = canvasWidth / 2;
+        let centerY = canvasHeight / 2;
+
+        const numVirtualLines = 6; // Más líneas
+        const particlesPerLine = 90; // Más partículas
+        const totalParticles = numVirtualLines * particlesPerLine;
+        
+        let baseGlobalRadius = Math.min(canvasWidth, canvasHeight) * 0.22; // Radio base general
+        const particleBaseSize = 1.0; 
+        
+        const easeFactor = 0.09; // Un poco más reactivo el movimiento radial
+
+        // Parámetros de deformación base (movimiento perpetuo)
+        const staticDeformParams = [
+            { freq: 3.2, amp: 3.0, speed: 0.00055 },
+            { freq: 6.1, amp: 2.8, speed: 0.00038 }
+        ];
+        // Parámetros de deformación por VOLUMEN BAJO (golpe radial)
+        const lowFreqVolumeDeformParams = [
+            { freq: 3.8, amp: 45, speed: 0.0012 }, // Mayor amplitud y velocidad
+            { freq: 6.5, amp: 40, speed: 0.0009 }
+        ];
+        
+        const lineSpacingVariation = 2.2;
+
+        let particles = [];
+        // Volúmenes diferenciados
+        let overallSmoothedVolume = 0;
+        let lowFreqSmoothedVolume = 0;
+        let highFreqSmoothedVolume = 0;
+        const volumeSmoothingFactor = 0.15; // Más rápido para reacción inmediata
+
+        let time = 0;
+
+        // --- Parámetros de Rotación Mejorados ---
+        const ROTATION_ENABLED = true;
+        const angularAccelerationEase = 0.02; // Más ágil
+        
+        const baseMaxTargetAngularAcceleration = 0.000010; 
+        const baseMaxAngularVelocity = 0.0025;          
+        const baseAngularDamping = 0.99; // Menos damping base, más "flotante"
+
+        // Multiplicadores por volumen AGUDO para rotación
+        const highFreqVolumeMultiplierForAngularAcceleration = 25.0; 
+        const highFreqVolumeMultiplierForMaxAngularVelocity = 20.0;  
+
+        const minTimeForAccelerationChange = 200; 
+        const randomTimeForAccelerationChange = 400;
+
+        // --- Nuevos Parámetros del Reactor ---
+        const PARTICLE_SIZE_MULTIPLIER_WITH_VOLUME = 2.5; // Mejora 2
+        const RADIAL_OVERSHOOT_FACTOR = 1.3; // Mejora 4 (1.0 = sin overshoot)
+        const AGITATION_AMOUNT_WITH_VOLUME = 1.5; // Mejora 6
+        const GLOBAL_RADIUS_PULSE_AMOUNT = 0.05; // Mejora 9 (5% del baseRadius)
+        const GLOBAL_RADIUS_PULSE_SMOOTHING = 0.01;
+        let smoothedGlobalPulseVolume = 0;
+
+        // Mejora 10: Vida útil
+        const ENABLE_PARTICLE_LIFESPAN = true;
+        const BASE_PARTICLE_LIFESPAN = 300; // frames (5 segundos a 60fps)
+        const LIFESPAN_VARIATION = 150;
+        const FADE_DURATION = 60; // frames para fundido
+
+
+        function createParticle(index, reinitializing = false) {
+            const virtualLineIndex = Math.floor(index / particlesPerLine);
+            const angle = (index % particlesPerLine / particlesPerLine) * Math.PI * 2;
+            const radiusOffsetForLine = (virtualLineIndex - (numVirtualLines -1) / 2) * lineSpacingVariation;
+            
+            const reactivity = 0.6 + Math.random() * 1.4; // Rango [0.6, 2.0) - Mejora 7 potenciada
+
+            let p = particles[index] || {}; // Reutilizar si es posible, o crear nuevo
+
+            p.id = index;
+            p.x = centerX + (Math.random() - 0.5) * (reinitializing ? canvasWidth * 0.3 : 50) ; // Si renace, puede venir de más lejos
+            p.y = centerY + (Math.random() - 0.5) * (reinitializing ? canvasHeight * 0.3 : 50);
+            p.targetX = centerX; 
+            p.targetY = centerY;
+            p.baseAngle = angle;
+            p.virtualLineIndex = virtualLineIndex;
+            p.radiusOffset = radiusOffsetForLine;
+            p.phaseSeed = Math.random() * Math.PI * 2;
+            p.reactivityFactor = reactivity;
+            
+            p.currentAngleOffset = (Math.random() - 0.5) * 0.1;
+            p.angularVelocity = (Math.random() - 0.5) * 0.0005;
+            p.angularAcceleration = 0;
+            p.targetAngularAcceleration = (Math.random() - 0.5) * 2 * baseMaxTargetAngularAcceleration * 0.5;
+            p.timeToChangeAccelerationTarget = time + minTimeForAccelerationChange + Math.floor(Math.random() * randomTimeForAccelerationChange);
+
+            // Mejora 10: Vida útil
+            if (ENABLE_PARTICLE_LIFESPAN) {
+                p.life = BASE_PARTICLE_LIFESPAN + Math.random() * LIFESPAN_VARIATION;
+                p.age = 0;
+                p.alpha = 0; // Comienza invisible para fade-in
+            } else {
+                p.alpha = 1; // Siempre visible si no hay lifespan
+            }
+            return p;
+        }
+
+        function initParticles() {
+            particles = [];
+            for (let i = 0; i < totalParticles; i++) {
+                particles.push(createParticle(i));
+            }
+        }
+        
+        function reinitializeParticle(index) {
+            particles[index] = createParticle(index, true);
+        }
+
+
+        function setupAudioNodes() {
+             return new Promise((resolve, reject) => {
+                navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+                    .then((stream) => {
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        analyser = audioContext.createAnalyser();
+                        const microphone = audioContext.createMediaStreamSource(stream);
+                        
+                        analyser.fftSize = 512; // Más resolución para frecuencias
+                        analyser.smoothingTimeConstant = 0.4; // Más reactivo
+                        const bufferLength = analyser.frequencyBinCount; // Ahora 256
+                        dataArray = new Uint8Array(bufferLength);
+
+                        microphone.connect(analyser);
+                        resolve();
+                    })
+                    .catch((err) => {
+                        console.error("Error al acceder al micrófono:", err);
+                        alert("No se pudo acceder al micrófono.");
+                        startButton.textContent = 'Error de Micrófono';
+                        startButton.disabled = false;
+                        reject(err);
+                    });
+            });
+        }
+
+        function updateAndDrawParticles(currentOverallVolume, currentLowFreqVolume, currentHighFreqVolume) {
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+            
+            const lowFreqFactor = Math.max(0, Math.min(currentLowFreqVolume, 1.0));
+            const highFreqFactor = Math.max(0, Math.min(currentHighFreqVolume, 1.0));
+            const overallVolumeFactor = Math.max(0, Math.min(currentOverallVolume, 1.0));
+
+            // Mejora 9: Pulso Global
+            smoothedGlobalPulseVolume = smoothedGlobalPulseVolume * (1 - GLOBAL_RADIUS_PULSE_SMOOTHING) + overallVolumeFactor * GLOBAL_RADIUS_PULSE_SMOOTHING;
+            const currentGlobalRadius = baseGlobalRadius * (1 + smoothedGlobalPulseVolume * GLOBAL_RADIUS_PULSE_AMOUNT);
+
+            particles.forEach((p, index) => {
+                // Mejora 10: Vida útil y Fundido
+                if (ENABLE_PARTICLE_LIFESPAN) {
+                    p.age++;
+                    if (p.age < FADE_DURATION) { // Fade in
+                        p.alpha = p.age / FADE_DURATION;
+                    } else if (p.age > p.life - FADE_DURATION) { // Fade out
+                        p.alpha = (p.life - p.age) / FADE_DURATION;
+                    } else {
+                        p.alpha = 1;
+                    }
+                    if (p.age > p.life) {
+                        reinitializeParticle(index); // Renace la partícula
+                        return; // Saltar el resto del dibujado para esta partícula este frame
+                    }
+                    if (p.alpha <= 0) return; // Si es invisible, no dibujar
+                }
+
+                const particleReactivity = p.reactivityFactor;
+
+                // --- Rotación influenciada por AGUDOS ---
+                const dynamicMaxTargetAngularAcceleration = baseMaxTargetAngularAcceleration * (1 + highFreqFactor * highFreqVolumeMultiplierForAngularAcceleration * particleReactivity);
+                const dynamicMaxAngularVelocity = baseMaxAngularVelocity * (1 + highFreqFactor * highFreqVolumeMultiplierForMaxAngularVelocity * particleReactivity);
+                // Mejora 5: Amortiguación angular dinámica
+                const dynamicAngularDamping = baseAngularDamping - (highFreqFactor * 0.015 * particleReactivity); // Menos damping (más giro) con agudos
+
+                let particleAngle = p.baseAngle;
+
+                if (ROTATION_ENABLED) {
+                    if (time >= p.timeToChangeAccelerationTarget) {
+                        p.targetAngularAcceleration = (Math.random() - 0.5) * 2 * dynamicMaxTargetAngularAcceleration;
+                        p.timeToChangeAccelerationTarget = time + minTimeForAccelerationChange + Math.floor(Math.random() * randomTimeForAccelerationChange);
+                    }
+                    p.angularAcceleration += (p.targetAngularAcceleration - p.angularAcceleration) * angularAccelerationEase;
+                    p.angularVelocity += p.angularAcceleration;
+                    p.angularVelocity *= dynamicAngularDamping; // Usar damping dinámico
+                    p.angularVelocity = Math.max(-dynamicMaxAngularVelocity, Math.min(dynamicMaxAngularVelocity, p.angularVelocity));
+                    p.currentAngleOffset += p.angularVelocity;
+                    particleAngle += p.currentAngleOffset;
+                }
+                
+                const cosA = Math.cos(particleAngle);
+                const sinA = Math.sin(particleAngle);
+
+                // --- Deformación Radial ---
+                let radiusDeformation = 0;
+                // Deformación base
+                staticDeformParams.forEach((param, idx) => {
+                    const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.7) + time * param.speed;
+                    radiusDeformation += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                });
+
+                // Deformación por BAJOS
+                let lowFreqDeformationAmount = 0;
+                if (currentLowFreqVolume > 0.01) {
+                    lowFreqVolumeDeformParams.forEach((param, idx) => {
+                        const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.9) + time * param.speed * (1 + lowFreqFactor * 1.2); // Velocidad del patrón también afectada
+                        lowFreqDeformationAmount += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                    });
+                    // Mejora 4: Overshoot (solo aplicado a la deformación por volumen)
+                    radiusDeformation += lowFreqFactor * lowFreqDeformationAmount * particleReactivity * RADIAL_OVERSHOOT_FACTOR;
+                }
+                
+                const particleSpecificBaseRadius = currentGlobalRadius + p.radiusOffset; // Usar radio global pulsante
+                let targetRadius = particleSpecificBaseRadius + radiusDeformation;
+                
+                // Aplicar "rebote" del overshoot (simplificado)
+                if (lowFreqFactor > 0.01 && RADIAL_OVERSHOOT_FACTOR > 1.0) {
+                     const overshootAmount = lowFreqFactor * lowFreqDeformationAmount * particleReactivity * (RADIAL_OVERSHOOT_FACTOR -1.0);
+                     // Si la deformación es positiva (expansión), restamos parte del overshoot gradualmente.
+                     // Si es negativa (contracción), sumamos. Esto es una simplificación.
+                     if (lowFreqDeformationAmount > 0) targetRadius -= overshootAmount * (1 - lowFreqFactor * 0.5); 
+                     else targetRadius += overshootAmount * (1 - lowFreqFactor * 0.5);
+                }
+
+
+                p.targetX = centerX + targetRadius * cosA;
+                p.targetY = centerY + targetRadius * sinA;
+
+                p.x += (p.targetX - p.x) * easeFactor;
+                p.y += (p.targetY - p.y) * easeFactor;
+
+                // Mejora 6: Agitación
+                let agitationX = 0;
+                let agitationY = 0;
+                if (overallVolumeFactor > 0.05) {
+                    const agitationStrength = AGITATION_AMOUNT_WITH_VOLUME * overallVolumeFactor * particleReactivity;
+                    agitationX = (Math.random() - 0.5) * agitationStrength;
+                    agitationY = (Math.random() - 0.5) * agitationStrength;
+                }
+
+                // Mejora 2: Tamaño de Partícula
+                const particleDynamicSize = particleBaseSize * (1 + overallVolumeFactor * PARTICLE_SIZE_MULTIPLIER_WITH_VOLUME * (0.5 + particleReactivity * 0.5) );
+                
+                // Mejora 3: Color de Partícula
+                // HSL: Hue (0-360), Saturation (0-100%), Lightness (0-100%)
+                // Base color: blanco (Lightness alta)
+                // Con volumen, bajamos lightness y añadimos Hue basado en balance low/high o en highFreq.
+                const baseLightness = 85;
+                const hue = 200 + highFreqFactor * 120; // Azul a magenta con agudos
+                const saturation = 70 + overallVolumeFactor * 30; // Más saturado con volumen
+                const lightness = baseLightness - overallVolumeFactor * 35; // Más oscuro/intenso con volumen
+
+                ctx.fillStyle = `hsla(${hue}, ${saturation}%, ${lightness}%, ${p.alpha})`;
+
+
+                ctx.beginPath();
+                ctx.arc(p.x + agitationX, p.y + agitationY, particleDynamicSize, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function animate() {
+            // --- Procesamiento de Audio ---
+            let normOverallVol = 0, normLowVol = 0, normHighVol = 0;
+
+            if (analyser && audioContext && audioContext.state === 'running') {
+                analyser.getByteFrequencyData(dataArray);
+                let overallSum = 0, lowSum = 0, highSum = 0;
+                const halfLength = Math.floor(dataArray.length / 3); // Dividir en tercios para bajos-medios-altos
+                const lowEnd = Math.floor(dataArray.length * 0.15); // Bins para bajos (ej. hasta ~1.3kHz con fft512@44.1k)
+                const highStart = Math.floor(dataArray.length * 0.4); // Bins para agudos (ej. desde ~3.5kHz)
+
+                for (let i = 0; i < dataArray.length; i++) {
+                    overallSum += dataArray[i];
+                    if (i < lowEnd) { // Considerar primeros bins como bajos
+                        lowSum += dataArray[i];
+                    }
+                    if (i >= highStart) { // Considerar últimos bins como agudos
+                        highSum += dataArray[i];
+                    }
+                }
+                // Normalización
+                let avgOverall = dataArray.length > 0 ? overallSum / dataArray.length : 0;
+                let avgLow = lowEnd > 0 ? lowSum / lowEnd : 0;
+                let avgHigh = (dataArray.length - highStart) > 0 ? highSum / (dataArray.length - highStart) : 0;
+
+                // Mejora 8: Curva de sensibilidad más agresiva
+                normOverallVol = Math.pow(Math.min(avgOverall / 128, 1.8), 0.70); 
+                normLowVol = Math.pow(Math.min(avgLow / 128, 1.8), 0.75);      
+                normHighVol = Math.pow(Math.min(avgHigh / 128, 1.8), 0.65); // Agudos más sensibles
+
+                normOverallVol = Math.max(0, normOverallVol);
+                normLowVol = Math.max(0, normLowVol);
+                normHighVol = Math.max(0, normHighVol);
+            }
+            
+            overallSmoothedVolume = overallSmoothedVolume * (1 - volumeSmoothingFactor) + normOverallVol * volumeSmoothingFactor;
+            lowFreqSmoothedVolume = lowFreqSmoothedVolume * (1 - volumeSmoothingFactor) + normLowVol * volumeSmoothingFactor;
+            highFreqSmoothedVolume = highFreqSmoothedVolume * (1 - volumeSmoothingFactor) + normHighVol * volumeSmoothingFactor;
+
+            // Limitar para evitar valores descontrolados
+            overallSmoothedVolume = Math.min(overallSmoothedVolume, 1.5);
+            lowFreqSmoothedVolume = Math.min(lowFreqSmoothedVolume, 1.5);
+            highFreqSmoothedVolume = Math.min(highFreqSmoothedVolume, 1.5);
+            
+            // Decaimiento si no hay audio activo
+            if (!audioContext || audioContext.state !== 'running') {
+                const decay = 0.97;
+                overallSmoothedVolume *= decay;
+                lowFreqSmoothedVolume *= decay;
+                highFreqSmoothedVolume *= decay;
+                if (overallSmoothedVolume < 0.001) overallSmoothedVolume = 0; // Poner a cero si es muy bajo
+                if (lowFreqSmoothedVolume < 0.001) lowFreqSmoothedVolume = 0;
+                if (highFreqSmoothedVolume < 0.001) highFreqSmoothedVolume = 0;
+            }
+
+            updateAndDrawParticles(overallSmoothedVolume, lowFreqSmoothedVolume, highFreqSmoothedVolume);
+            
+            time++;
+            animationFrameId = requestAnimationFrame(animate);
+        }
+        
+        startButton.addEventListener('click', () => {
+            if (audioContext && audioContext.state === 'running') {
+                 audioContext.suspend().then(() => {
+                    startButton.textContent = 'Reanudar Reactor';
+                    startButton.style.backgroundColor = "#3f9342"; // Verde para reanudar
+                    startButton.style.boxShadow = "0 0 15px rgba(63, 147, 66, 0.5)";
+                });
+            } else if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    startButton.textContent = 'Reactor Activo';
+                    startButton.style.backgroundColor = "#c83241";
+                     startButton.style.boxShadow = "0 0 15px rgba(200, 50, 65, 0.5)";
+                });
+            } else if (!audioContext) {
+                startButton.disabled = true;
+                startButton.textContent = 'Iniciando Core...';
+                initParticles(); 
+                setupAudioNodes()
+                    .then(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId); 
+                        time = 0; 
+                        overallSmoothedVolume = 0; lowFreqSmoothedVolume = 0; highFreqSmoothedVolume = 0; // Resetear
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.textContent = 'Reactor Activo';
+                        startButton.style.backgroundColor = "#c83241";
+                        startButton.style.boxShadow = "0 0 15px rgba(200, 50, 65, 0.5)";
+                        startButton.disabled = false;
+                    })
+                    .catch(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                        initParticles(); 
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.disabled = false; 
+                        startButton.textContent = 'Error - Reintentar';
+                    });
+            }
+        });
+
+        initParticles(); // Dibujar estado inicial
+        animationFrameId = requestAnimationFrame(animate);
+
+        window.addEventListener('resize', () => {
+            canvas.width = visualizerContainer.offsetWidth;
+            canvas.height = visualizerContainer.offsetHeight;
+            canvasWidth = canvas.width;
+            canvasHeight = canvas.height;
+            centerX = canvasWidth / 2;
+            centerY = canvasHeight / 2;
+            baseGlobalRadius = Math.min(canvasWidth, canvasHeight) * 0.22;
+            // Considerar re-init si cambian numParticles, etc.
+        });
+
+    </script>
+</body>
+</html>

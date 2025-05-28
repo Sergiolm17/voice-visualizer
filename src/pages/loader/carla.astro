@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizador de Voz Avanzado</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #0c0c0c; /* Un negro aún más profundo */
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+        .visualizer-container {
+            width: 380px; /* Ligeramente más grande */
+            height: 380px;
+            position: relative;
+            margin-bottom: 25px;
+        }
+        #voiceVisualizer {
+            display: block;
+            background-color: transparent;
+        }
+        #startButton {
+            padding: 14px 30px; /* Botón más prominente */
+            font-size: 17px;
+            cursor: pointer;
+            background-color: #6a0dad; /* Un morado intenso como acento */
+            color: white;
+            border: none;
+            border-radius: 7px;
+            transition: background-color 0.3s, transform 0.1s;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        #startButton:hover {
+            background-color: #8a2be2; /* Más brillante al pasar el mouse */
+        }
+        #startButton:active {
+            transform: scale(0.97);
+        }
+        #startButton:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
+        .instructions {
+            font-size: 14px;
+            color: #999;
+            margin-top: 15px;
+            text-align: center;
+        }
+        .footer-text {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            font-size: 10px;
+            color: #666;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+        }
+    </style>
+</head>
+<body>
+    <div class="visualizer-container">
+        <canvas id="voiceVisualizer"></canvas>
+    </div>
+    <button id="startButton">Activar Magia Vocal</button>
+    <p class="instructions">Permite el micrófono.<br>Tu voz desatará un torbellino de partículas.</p>
+
+    <div class="footer-text">KINETIC AUDIOFLUX</div>
+
+    <script is:inline>
+        const canvas = document.getElementById('voiceVisualizer');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const visualizerContainer = document.querySelector('.visualizer-container');
+
+        canvas.width = visualizerContainer.offsetWidth;
+        canvas.height = visualizerContainer.offsetHeight;
+
+        let audioContext;
+        let analyser;
+        let dataArray;
+        let animationFrameId;
+
+        let canvasWidth = canvas.width;
+        let canvasHeight = canvas.height;
+        let centerX = canvasWidth / 2;
+        let centerY = canvasHeight / 2;
+
+        const numVirtualLines = 6; // Más capas para la nube
+        const particlesPerLine = 90; // Más partículas
+        const totalParticles = numVirtualLines * particlesPerLine;
+        
+        let baseRadius = Math.min(canvasWidth, canvasHeight) * 0.26;
+        const baseParticleSize = 1.2; // Tamaño base de las partículas
+        const particleColor = '#f0f0f0'; // Un blanco brillante
+
+        const easeFactor = 0.09; // Un poco más reactivo el movimiento radial
+
+        const staticDeformParams = [ // Deformación base, ahora más sutil
+            { freq: 4.5, amp: 2.5, speed: 0.0005 },
+            { freq: 7.2, amp: 2.0, speed: 0.0003 }
+        ];
+        const volumeDeformParams = [ // Deformación radial por voz
+            { freq: 3.8, amp: 35, speed: 0.0011 }, // Más amplitud y velocidad
+            { freq: 6.5, amp: 30, speed: 0.0008 }
+        ];
+        
+        const lineSpacingVariation = 2.2;
+
+        let particles = [];
+        let smoothedVolume = 0;
+        // SmoothingFactor más alto para respuesta de volumen más inmediata
+        const smoothingFactor = 0.18; // Antes 0.12
+
+        let time = 0;
+
+        // --- Parámetros de Rotación "EXPLOSIVA" ---
+        const ROTATION_ENABLED = true;
+        const angularAccelerationEase = 0.025; // Más rápido para alcanzar el target de aceleración
+        
+        const baseMaxTargetAngularAcceleration = 0.000010; // Muy, muy sutil en reposo
+        const baseMaxAngularVelocity = 0.002;          // Casi imperceptible en reposo
+        const baseAngularDamping = 0.98;               // Un poco más de freno en reposo
+
+        // Multiplicadores por volumen EXTREMADAMENTE ALTOS
+        const volumeMultiplierForAngularAcceleration = 80.0; // Antes 15.0
+        const volumeMultiplierForMaxAngularVelocity = 45.0;  // Antes 10.0
+        // Potencia para el impacto del volumen en la rotación (mayor que 1 para efecto no lineal)
+        const volumePowerForRotation = 2.0; // Antes implícito o lineal
+
+        const minTimeForAccelerationChange = 200; 
+        const randomTimeForAccelerationChange = 400;
+
+        // Para la variación de tamaño
+        const minParticleSizeFactor = 0.4; // Mínimo tamaño relativo al baseParticleSize (40%)
+        const particleSizeVelocityScale = 0.7; // Cuánto afecta la velocidad al tamaño
+
+        function createParticle(index) {
+            const virtualLineIndex = Math.floor(index / particlesPerLine);
+            const angle = (index % particlesPerLine / particlesPerLine) * Math.PI * 2;
+            const radiusOffsetForLine = (virtualLineIndex - (numVirtualLines -1) / 2) * lineSpacingVariation;
+            const reactivity = 0.6 + Math.random() * 1.1; // Rango [0.6, 1.7)
+
+            return {
+                id: index,
+                x: centerX + (Math.random() - 0.5) * 30, // Menos dispersión inicial
+                y: centerY + (Math.random() - 0.5) * 30,
+                targetX: centerX, 
+                targetY: centerY,
+                baseAngle: angle,
+                virtualLineIndex: virtualLineIndex,
+                radiusOffset: radiusOffsetForLine,
+                phaseSeed: Math.random() * Math.PI * 2,
+                reactivityFactor: reactivity,
+                currentAngleOffset: (Math.random() - 0.5) * 0.05,
+                angularVelocity: 0, // Iniciar sin velocidad angular
+                angularAcceleration: 0,
+                targetAngularAcceleration: 0,
+                timeToChangeAccelerationTarget: time + minTimeForAccelerationChange + Math.floor(Math.random() * randomTimeForAccelerationChange)
+            };
+        }
+
+        function initParticles() {
+            particles = [];
+            for (let i = 0; i < totalParticles; i++) {
+                particles.push(createParticle(i));
+            }
+        }
+
+        function setupAudioNodes() {
+             return new Promise((resolve, reject) => {
+                navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+                    .then((stream) => {
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        analyser = audioContext.createAnalyser();
+                        const microphone = audioContext.createMediaStreamSource(stream);
+                        
+                        analyser.fftSize = 256; 
+                        analyser.smoothingTimeConstant = 0.35; // Respuesta muy rápida del analizador (antes 0.5)
+                        const bufferLength = analyser.frequencyBinCount;
+                        dataArray = new Uint8Array(bufferLength);
+
+                        microphone.connect(analyser);
+                        resolve();
+                    })
+                    .catch((err) => {
+                        console.error("Error al acceder al micrófono:", err);
+                        alert("No se pudo acceder al micrófono. Revisa los permisos.");
+                        startButton.textContent = 'Error de Micrófono';
+                        startButton.disabled = false;
+                        reject(err);
+                    });
+            });
+        }
+
+        function updateAndDrawParticles(currentSmoothedVolume) {
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+            ctx.fillStyle = particleColor;
+
+            // volumeFactor ahora es más sensible y se usa para la explosión
+            const volumeFactorForRotation = Math.pow(Math.max(0, Math.min(currentSmoothedVolume, 1.0)), volumePowerForRotation);
+
+            particles.forEach(p => {
+                const particleReactivity = p.reactivityFactor;
+                
+                // ROTACIÓN: Determinar parámetros basados en si hay voz o no
+                let particleCurrentMaxTargetAcc, particleCurrentMaxAngVel, particleCurrentDamping;
+
+                if (volumeFactorForRotation > 0.01) { // Umbral bajo para activar modo "explosivo"
+                    particleCurrentMaxTargetAcc = baseMaxTargetAngularAcceleration * volumeMultiplierForAngularAcceleration * particleReactivity * volumeFactorForRotation;
+                    particleCurrentMaxAngVel = baseMaxAngularVelocity * volumeMultiplierForMaxAngularVelocity * particleReactivity * volumeFactorForRotation;
+                    particleCurrentDamping = 0.99; // Menos freno cuando hay voz para mantener la velocidad
+                } else {
+                    particleCurrentMaxTargetAcc = baseMaxTargetAngularAcceleration * particleReactivity; // Reactividad base también afecta un poco
+                    particleCurrentMaxAngVel = baseMaxAngularVelocity * particleReactivity;
+                    particleCurrentDamping = baseAngularDamping;
+                }
+
+                let particleAngle = p.baseAngle;
+
+                if (ROTATION_ENABLED) {
+                    if (time >= p.timeToChangeAccelerationTarget && volumeFactorForRotation <= 0.01) { // Solo cambiar target de reposo aleatoriamente
+                        p.targetAngularAcceleration = (Math.random() - 0.5) * 2 * particleCurrentMaxTargetAcc;
+                        p.timeToChangeAccelerationTarget = time + minTimeForAccelerationChange + Math.floor(Math.random() * randomTimeForAccelerationChange);
+                    } else if (volumeFactorForRotation > 0.01) {
+                        // Forzar un target de aceleración fuerte si hay voz, dirección aleatoria por partícula
+                        // Se podría hacer que todas giren en la misma dirección o alternar
+                        p.targetAngularAcceleration = (p.id % 2 === 0 ? 1 : -1) * particleCurrentMaxTargetAcc * (0.5 + Math.random() * 0.5) ; // Dirección y magnitud aleatoria
+                    }
+
+
+                    p.angularAcceleration += (p.targetAngularAcceleration - p.angularAcceleration) * angularAccelerationEase;
+                    p.angularVelocity += p.angularAcceleration;
+                    p.angularVelocity *= particleCurrentDamping;
+                    p.angularVelocity = Math.max(-particleCurrentMaxAngVel, Math.min(particleCurrentMaxAngVel, p.angularVelocity));
+                    
+                    p.currentAngleOffset += p.angularVelocity;
+                    particleAngle += p.currentAngleOffset;
+                }
+                
+                const cosA = Math.cos(particleAngle);
+                const sinA = Math.sin(particleAngle);
+
+                let radiusDeformation = 0;
+                staticDeformParams.forEach((param, idx) => {
+                    const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.7) + time * param.speed;
+                    radiusDeformation += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                });
+
+                let volumeSpecificDeformationAmount = 0;
+                // Usar currentSmoothedVolume original para la deformación radial, no el potenciado para rotación
+                if (currentSmoothedVolume > 0.015) { 
+                    volumeDeformParams.forEach((param, idx) => {
+                        const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.9) + time * param.speed * (1 + currentSmoothedVolume * 1.2); // Más impacto del volumen en velocidad de patrón
+                        volumeSpecificDeformationAmount += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                    });
+                    radiusDeformation += currentSmoothedVolume * volumeSpecificDeformationAmount * particleReactivity;
+                }
+                
+                const currentParticleBaseRadius = baseRadius + p.radiusOffset;
+                const targetRadius = currentParticleBaseRadius + radiusDeformation;
+                
+                p.targetX = centerX + targetRadius * cosA;
+                p.targetY = centerY + targetRadius * sinA;
+
+                p.x += (p.targetX - p.x) * easeFactor;
+                p.y += (p.targetY - p.y) * easeFactor;
+
+                // VARIACIÓN DE TAMAÑO SUTIL
+                let currentParticleSize = baseParticleSize;
+                if (ROTATION_ENABLED && particleCurrentMaxAngVel > baseMaxAngularVelocity * 2) { // Solo si está en modo "voz" y hay velocidad considerable
+                    const speedRatio = Math.min(1, Math.abs(p.angularVelocity) / (particleCurrentMaxAngVel * 0.5)); // Normalizar velocidad a un rango esperado
+                    currentParticleSize = baseParticleSize * (1 - speedRatio * particleSizeVelocityScale);
+                    currentParticleSize = Math.max(baseParticleSize * minParticleSizeFactor, currentParticleSize);
+                }
+
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, currentParticleSize, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function animate() {
+            if (!audioContext) {
+                updateAndDrawParticles(0); 
+                animationFrameId = requestAnimationFrame(animate);
+                time++;
+                return;
+            }
+             if (!analyser || audioContext.state === 'suspended') {
+                 animationFrameId = requestAnimationFrame(animate);
+                 smoothedVolume = Math.max(0, smoothedVolume * 0.94); // Decaimiento más rápido para volver a la calma
+                 updateAndDrawParticles(smoothedVolume); 
+                 time++;
+                 return;
+            }
+
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            const relevantBins = Math.floor(dataArray.length * 0.30); // Enfocarse aún más en bajos para "golpe"
+            for (let i = 0; i < relevantBins; i++) {
+                sum += dataArray[i];
+            }
+            let averageVolume = relevantBins > 0 ? sum / relevantBins : 0;
+            
+            let normalizedVolume = Math.min(averageVolume / 128, 1.8); // Permitir un poco más de rango
+            normalizedVolume = Math.pow(normalizedVolume, 0.75); // Aún más sensible a bajos
+            normalizedVolume = Math.max(0, normalizedVolume);
+
+            smoothedVolume = smoothedVolume * (1 - smoothingFactor) + normalizedVolume * smoothingFactor;
+            smoothedVolume = Math.min(smoothedVolume, 2.0); // Cap general
+            
+            updateAndDrawParticles(smoothedVolume);
+            
+            time++;
+            animationFrameId = requestAnimationFrame(animate);
+        }
+        
+        startButton.addEventListener('click', () => {
+            if (audioContext && audioContext.state === 'running') {
+                 audioContext.suspend().then(() => {
+                    startButton.textContent = 'Reanudar Magia';
+                    startButton.style.backgroundColor = "#6a0dad";
+                });
+            } else if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    startButton.textContent = 'Magia Activa';
+                    startButton.style.backgroundColor = "#ff4081"; // Un rosa/fucsia para estado activo
+                });
+            } else if (!audioContext) {
+                startButton.disabled = true;
+                startButton.textContent = 'Canalizando...';
+                initParticles(); 
+                setupAudioNodes()
+                    .then(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId); 
+                        time = 0; 
+                        smoothedVolume = 0; 
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.textContent = 'Magia Activa';
+                        startButton.style.backgroundColor = "#ff4081"; 
+                        startButton.disabled = false;
+                    })
+                    .catch(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                        initParticles(); 
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.disabled = false; 
+                    });
+            }
+        });
+
+        initParticles();
+        animationFrameId = requestAnimationFrame(animate);
+
+        window.addEventListener('resize', () => {
+            canvas.width = visualizerContainer.offsetWidth;
+            canvas.height = visualizerContainer.offsetHeight;
+            canvasWidth = canvas.width;
+            canvasHeight = canvas.height;
+            centerX = canvasWidth / 2;
+            centerY = canvasHeight / 2;
+            baseRadius = Math.min(canvasWidth, canvasHeight) * 0.26;
+        });
+    </script>
+</body>
+</html>

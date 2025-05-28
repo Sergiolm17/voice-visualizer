@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizador de Voz Avanzado (Vanilla JS)</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #0c0c0c; /* Aún más oscuro */
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+        .visualizer-container {
+            width: 350px; /* Puedes hacerlo más grande si quieres más impacto */
+            height: 350px;
+            position: relative;
+            margin-bottom: 25px;
+        }
+        #voiceVisualizer {
+            display: block;
+            background-color: transparent;
+        }
+        #startButton {
+            padding: 12px 25px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #007BFF; /* Azul brillante */
+            color: white;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s, transform 0.1s;
+            font-weight: 500;
+            box-shadow: 0 0 15px rgba(0, 123, 255, 0.5);
+        }
+        #startButton:hover {
+            background-color: #0056b3;
+            box-shadow: 0 0 20px rgba(0, 123, 255, 0.7);
+        }
+        #startButton:active {
+            transform: scale(0.98);
+        }
+        #startButton:disabled {
+            background-color: #555;
+            box-shadow: none;
+            cursor: not-allowed;
+        }
+        .instructions {
+            font-size: 14px;
+            color: #999;
+            margin-top: 15px;
+            text-align: center;
+        }
+        .footer-text {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            font-size: 10px;
+            color: #555;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+        }
+    </style>
+</head>
+<body>
+    <div class="visualizer-container">
+        <canvas id="voiceVisualizer"></canvas>
+    </div>
+    <button id="startButton">Iniciar Portal de Voz</button>
+    <p class="instructions">Permite acceso al micrófono.<br>Observa cómo la voz moldea la nebulosa.</p>
+
+    <div class="footer-text">DIMENSIONAL VOICE PORTAL</div>
+
+    <script is:inline>
+        const canvas = document.getElementById('voiceVisualizer');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const visualizerContainer = document.querySelector('.visualizer-container');
+
+        canvas.width = visualizerContainer.offsetWidth;
+        canvas.height = visualizerContainer.offsetHeight;
+
+        let audioContext;
+        let analyser;
+        let dataArray;
+        let animationFrameId;
+
+        let canvasWidth = canvas.width;
+        let canvasHeight = canvas.height;
+        let centerX = canvasWidth / 2;
+        let centerY = canvasHeight / 2;
+
+        const numVirtualLines = 6; // Más "capas" para la profundidad
+        const particlesPerLine = 70; // Menos por línea para no saturar con más líneas
+        const totalParticles = numVirtualLines * particlesPerLine;
+        
+        let baseRadius = Math.min(canvasWidth, canvasHeight) * 0.20; // Radio base un poco menor
+        const baseParticleSize = 1.5; // Tamaño base de partícula (antes de escalar por Z)
+        
+        const easeFactor = 0.09; // Un poco más rápido para que los target se alcancen bien
+
+        // Deformación estática (movimiento de fondo)
+        const staticDeformParams = [
+            { freq: 3.2, amp: 3.0, speed: 0.00055 },
+            { freq: 5.5, amp: 2.5, speed: 0.00038 }
+        ];
+        // Deformación por volumen (radial)
+        const volumeDeformParams = [
+            { freq: 3.8, amp: 35, speed: 0.001 }, // Un poco más de amplitud y velocidad
+            { freq: 6.9, amp: 30, speed: 0.0008 }
+        ];
+        
+        const lineSpacingVariation = 2.0; // Espaciado entre "líneas" virtuales radiales
+
+        let particles = [];
+        let smoothedVolume = 0;
+        const smoothingFactor = 0.1; // Más rápido para que el Z reaccione bien
+
+        let time = 0;
+
+        // --- Parámetros de Profundidad (Eje Z) ---
+        const PERSPECTIVE_ENABLED = true;
+        const focalLength = 300; // Distancia focal para la perspectiva
+        const baseZSpread = 150;   // Cuán dispersas están las partículas en Z inicialmente
+        const zEaseFactor = 0.08;  // Suavidad para el movimiento en Z
+        // Cuando hablas, las partículas se "alejan" (targetZ negativo)
+        // y luego "rebotan" un poco hacia adelante (targetZ positivo pequeño)
+        const zVolumePushAmount = -250; // Cuánto se alejan con la voz
+        const zVolumeBounceAmount = 80;   // Cuánto rebotan hacia adelante después del push
+        const zReturnToNeutralFactor = 0.96; // Con qué velocidad vuelven a su Z original
+
+        // --- Parámetros de Rotación ---
+        const ROTATION_ENABLED = true;
+        const angularAccelerationEase = 0.018;
+        const baseMaxTargetAngularAcceleration = 0.00002;
+        const baseMaxAngularVelocity = 0.0035;
+        const baseAngularDamping = 0.98;
+        const volumeMultiplierForAngularAcceleration = 18.0;
+        const volumeMultiplierForMaxAngularVelocity = 12.0;
+        const minTimeForAccelerationChange = 200;
+        const randomTimeForAccelerationChange = 400;
+
+        // --- Parámetros de Color ---
+        const COLOR_ENABLED = true;
+        // Colores HSL: H (0-360), S (0-100%), L (0-100%)
+        const colorCalm = { h: 200, s: 80, l: 60 };    // Azulado/Cian
+        const colorActive = { h: 0, s: 90, l: 65 };  // Rojo/Naranja
+        const colorZFactor = 0.3; // Cuánto afecta Z al brillo (0-1)
+
+
+        function createParticle(index) {
+            const virtualLineIndex = Math.floor(index / particlesPerLine); // 0 a numVirtualLines-1
+            const angle = (index % particlesPerLine / particlesPerLine) * Math.PI * 2;
+            const radiusOffsetForLine = (virtualLineIndex - (numVirtualLines -1) / 2) * lineSpacingVariation;
+            
+            const reactivity = 0.6 + Math.random() * 1.1; // Rango [0.6, 1.7)
+
+            // Z inicial basado en su "capa" o línea virtual, y un poco de aleatoriedad
+            const initialZ = ((virtualLineIndex / (numVirtualLines -1)) - 0.5) * baseZSpread + (Math.random() - 0.5) * 30;
+
+            return {
+                id: index,
+                x: centerX, y: centerY,
+                targetX: centerX, targetY: centerY,
+                baseAngle: angle,
+                virtualLineIndex: virtualLineIndex,
+                radiusOffset: radiusOffsetForLine,
+                phaseSeed: Math.random() * Math.PI * 2,
+                reactivityFactor: reactivity,
+                
+                // Rotación
+                currentAngleOffset: (Math.random() - 0.5) * 0.1,
+                angularVelocity: (Math.random() - 0.5) * 0.0005,
+                angularAcceleration: 0,
+                targetAngularAcceleration: (Math.random() - 0.5) * 2 * baseMaxTargetAngularAcceleration * 0.5,
+                timeToChangeAccelerationTarget: time + minTimeForAccelerationChange + Math.floor(Math.random() * randomTimeForAccelerationChange),
+
+                // Profundidad (Z)
+                z: initialZ,
+                initialZ: initialZ, // Guardamos el Z original para volver a él
+                targetZ: initialZ,  // El Z objetivo
+                zVelocity: 0,       // Para un movimiento Z más físico (opcional, por ahora simple ease)
+                lastVolumePushTime: 0 // Para controlar el "rebote" en Z
+            };
+        }
+
+        function initParticles() {
+            particles = [];
+            for (let i = 0; i < totalParticles; i++) {
+                particles.push(createParticle(i));
+            }
+        }
+
+        function setupAudioNodes() {
+             return new Promise((resolve, reject) => {
+                navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+                    .then((stream) => {
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        analyser = audioContext.createAnalyser();
+                        const microphone = audioContext.createMediaStreamSource(stream);
+                        
+                        analyser.fftSize = 256; 
+                        analyser.smoothingTimeConstant = 0.45; 
+                        const bufferLength = analyser.frequencyBinCount;
+                        dataArray = new Uint8Array(bufferLength);
+
+                        microphone.connect(analyser);
+                        resolve();
+                    })
+                    .catch((err) => console.error("Error al acceder al micrófono:", err) && reject(err));
+            });
+        }
+        
+        let lastHighVolumeTime = 0; // Para controlar el pulso Z
+
+        function updateAndDrawParticles(currentSmoothedVolume) {
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+            
+            const volumeFactor = Math.max(0, Math.min(currentSmoothedVolume, 1.0));
+
+            // Lógica de Pulso Z Global
+            // Si hay un pico de volumen, empujar todas las partículas
+            if (currentSmoothedVolume > 0.65 && (time - lastHighVolumeTime > 30)) { // Umbral y cooldown
+                lastHighVolumeTime = time;
+                particles.forEach(p => {
+                    // Empujar más las partículas reactivas
+                    p.targetZ = p.initialZ + zVolumePushAmount * p.reactivityFactor * volumeFactor;
+                    p.lastVolumePushTime = time; // Marcar cuándo fue el último push para esta partícula
+                });
+            }
+
+
+            particles.forEach(p => {
+                // Movimiento Z: Easing hacia targetZ
+                p.z += (p.targetZ - p.z) * zEaseFactor;
+
+                // Lógica de rebote y retorno al Z inicial
+                if (p.targetZ !== p.initialZ) {
+                    if (time > p.lastVolumePushTime + 10 && p.targetZ < p.initialZ) { // Después del push, rebotar
+                        p.targetZ = p.initialZ + zVolumeBounceAmount * p.reactivityFactor *0.5; // Rebote menor
+                    } else if (Math.abs(p.z - p.targetZ) < 1 && p.targetZ !== p.initialZ) { // Si casi llegó al targetZ de rebote
+                         p.targetZ = p.initialZ; // Empezar a volver al Z original
+                    }
+                }
+                 // Forzar lentamente el retorno al Z inicial si no hay actividad
+                if (currentSmoothedVolume < 0.1 && p.targetZ !== p.initialZ && Math.abs(p.z - p.initialZ) > 1) {
+                     p.targetZ = p.initialZ; // Asegurar que vuelva si el volumen baja mucho
+                }
+
+
+                // Escala de Perspectiva
+                let perspectiveScale = 1;
+                if (PERSPECTIVE_ENABLED) {
+                    perspectiveScale = focalLength / (focalLength - p.z);
+                    perspectiveScale = Math.max(0.1, Math.min(perspectiveScale, 3)); // Clampear para evitar tamaños extremos
+                }
+
+                const particleReactivity = p.reactivityFactor;
+                const dynamicMaxTargetAngularAcceleration = baseMaxTargetAngularAcceleration * (1 + volumeFactor * volumeMultiplierForAngularAcceleration * particleReactivity * perspectiveScale); // Rotación afectada por Z
+                const dynamicMaxAngularVelocity = baseMaxAngularVelocity * (1 + volumeFactor * volumeMultiplierForMaxAngularVelocity * particleReactivity * perspectiveScale); // y Z
+
+                let particleAngle = p.baseAngle;
+                if (ROTATION_ENABLED) {
+                    if (time >= p.timeToChangeAccelerationTarget) {
+                        p.targetAngularAcceleration = (Math.random() - 0.5) * 2 * dynamicMaxTargetAngularAcceleration;
+                        p.timeToChangeAccelerationTarget = time + minTimeForAccelerationChange + Math.floor(Math.random() * randomTimeForAccelerationChange);
+                    }
+                    p.angularAcceleration += (p.targetAngularAcceleration - p.angularAcceleration) * angularAccelerationEase;
+                    p.angularVelocity += p.angularAcceleration;
+                    p.angularVelocity *= baseAngularDamping;
+                    p.angularVelocity = Math.max(-dynamicMaxAngularVelocity, Math.min(dynamicMaxAngularVelocity, p.angularVelocity));
+                    p.currentAngleOffset += p.angularVelocity;
+                    particleAngle += p.currentAngleOffset;
+                }
+                
+                const cosA = Math.cos(particleAngle);
+                const sinA = Math.sin(particleAngle);
+
+                let radiusDeformation = 0;
+                staticDeformParams.forEach((param, idx) => {
+                    const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.7) + time * param.speed;
+                    radiusDeformation += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                });
+
+                let volumeSpecificDeformationAmount = 0;
+                if (currentSmoothedVolume > 0.02) {
+                    volumeDeformParams.forEach((param, idx) => {
+                        const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.9) + time * param.speed * (1 + currentSmoothedVolume * 0.8);
+                        volumeSpecificDeformationAmount += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                    });
+                    // Deformación radial también afectada por perspectiva y reactividad
+                    radiusDeformation += currentSmoothedVolume * volumeSpecificDeformationAmount * particleReactivity * perspectiveScale;
+                }
+                
+                const currentParticleBaseRadius = (baseRadius + p.radiusOffset) * perspectiveScale; // Radio base afectado por Z
+                const targetRadius = currentParticleBaseRadius + radiusDeformation;
+                
+                // Posición final afectada por la perspectiva (más sutil si el centro es 0,0 para la perspectiva)
+                // Para un efecto simple, escalamos el desplazamiento desde el centro.
+                p.targetX = centerX + targetRadius * cosA;
+                p.targetY = centerY + targetRadius * sinA;
+
+                p.x += (p.targetX - p.x) * easeFactor;
+                p.y += (p.targetY - p.y) * easeFactor;
+
+                // Calcular Color
+                let finalColor = `hsl(${colorCalm.h}, ${colorCalm.s}%, ${colorCalm.l}%)`;
+                if (COLOR_ENABLED) {
+                    const h = colorCalm.h + (colorActive.h - colorCalm.h) * volumeFactor;
+                    const s = colorCalm.s + (colorActive.s - colorCalm.s) * volumeFactor;
+                    // Brillo afectado por Z (más lejanas más oscuras, más cercanas más brillantes)
+                    // Normalizar Z entre aprox -1 y 1 para el factor de brillo
+                    // Asumiendo que p.z puede ir de -baseZSpread/2 a +baseZSpread/2 (aprox)
+                    const zNormalizedForLight = Math.max(0, Math.min(1, (p.z + baseZSpread * 0.75) / (baseZSpread * 1.5) )); // Rango ajustado
+                    const lBase = colorCalm.l + (colorActive.l - colorCalm.l) * volumeFactor;
+                    const l = Math.max(20, Math.min(90, lBase * (1 - colorZFactor) + lBase * colorZFactor * 2 * zNormalizedForLight));
+
+                    finalColor = `hsl(${h.toFixed(0)}, ${s.toFixed(0)}%, ${l.toFixed(0)}%)`;
+                }
+                ctx.fillStyle = finalColor;
+                
+                const particleDrawSize = Math.max(0.5, baseParticleSize * perspectiveScale); // Tamaño final de la partícula
+
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, particleDrawSize, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function animate() {
+            // ... (resto de la función animate es igual, solo asegúrate que llame a updateAndDrawParticles con smoothedVolume)
+            if (!audioContext) {
+                updateAndDrawParticles(0); 
+                animationFrameId = requestAnimationFrame(animate);
+                time++;
+                return;
+            }
+             if (!analyser || audioContext.state === 'suspended') {
+                 animationFrameId = requestAnimationFrame(animate);
+                 smoothedVolume = Math.max(0, smoothedVolume * 0.965); 
+                 updateAndDrawParticles(smoothedVolume); 
+                 time++;
+                 return;
+            }
+
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            const relevantBins = Math.floor(dataArray.length * 0.35);
+            for (let i = 0; i < relevantBins; i++) {
+                sum += dataArray[i];
+            }
+            let averageVolume = relevantBins > 0 ? sum / relevantBins : 0;
+            
+            let normalizedVolume = Math.min(averageVolume / 128, 1.5); 
+            normalizedVolume = Math.pow(normalizedVolume, 0.80); 
+            normalizedVolume = Math.max(0, normalizedVolume);
+
+            smoothedVolume = smoothedVolume * (1 - smoothingFactor) + normalizedVolume * smoothingFactor;
+            smoothedVolume = Math.min(smoothedVolume, 1.5); 
+            
+            updateAndDrawParticles(smoothedVolume);
+            
+            time++;
+            animationFrameId = requestAnimationFrame(animate);
+        }
+        
+        // ... (Lógica del botón de inicio y resize es igual)
+        startButton.addEventListener('click', () => {
+            if (audioContext && audioContext.state === 'running') {
+                 audioContext.suspend().then(() => {
+                    startButton.textContent = 'Reanudar Portal';
+                    startButton.style.backgroundColor = "#007BFF";
+                    startButton.style.boxShadow = "0 0 15px rgba(0, 123, 255, 0.5)";
+
+                });
+            } else if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    startButton.textContent = 'Portal Activo';
+                    startButton.style.backgroundColor = "#dc3545"; // Rojo cuando activo
+                    startButton.style.boxShadow = "0 0 15px rgba(220, 53, 69, 0.5)";
+                });
+            } else if (!audioContext) {
+                startButton.disabled = true;
+                startButton.textContent = 'Abriendo Portal...';
+                initParticles(); 
+                setupAudioNodes()
+                    .then(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId); 
+                        time = 0; 
+                        smoothedVolume = 0; 
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.textContent = 'Portal Activo';
+                        startButton.style.backgroundColor = "#dc3545"; // Rojo cuando activo
+                        startButton.style.boxShadow = "0 0 15px rgba(220, 53, 69, 0.5)";
+                        startButton.disabled = false;
+                    })
+                    .catch((err) => {
+                        startButton.textContent = 'Error de Micrófono';
+                        startButton.style.backgroundColor = "#6c757d";
+                         startButton.style.boxShadow = "none";
+                        startButton.disabled = false; 
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                        initParticles(); 
+                        animationFrameId = requestAnimationFrame(animate); 
+                    });
+            }
+        });
+
+        initParticles();
+        animationFrameId = requestAnimationFrame(animate);
+
+        window.addEventListener('resize', () => {
+            canvas.width = visualizerContainer.offsetWidth;
+            canvas.height = visualizerContainer.offsetHeight;
+            canvasWidth = canvas.width;
+            canvasHeight = canvas.height;
+            centerX = canvasWidth / 2;
+            centerY = canvasHeight / 2;
+            baseRadius = Math.min(canvasWidth, canvasHeight) * 0.20;
+            focalLength = canvasWidth * 0.8; // Ajustar distancia focal con el tamaño
+        });
+
+    </script>
+</body>
+</html>

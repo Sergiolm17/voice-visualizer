@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizador de Voz con Partículas Dinámicas</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #121212; /* Un negro un poco más suave que #000 */
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+        .visualizer-container {
+            width: 350px;
+            height: 350px;
+            position: relative;
+            margin-bottom: 25px;
+        }
+        #voiceVisualizer {
+            display: block;
+            background-color: transparent; /* El canvas es transparente */
+        }
+        #startButton {
+            padding: 12px 25px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #03DAC6; /* Un color teal vibrante para el botón */
+            color: #121212; /* Texto oscuro para contraste con botón claro */
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s, transform 0.1s;
+            font-weight: 600; /* Un poco más de peso */
+            letter-spacing: 0.5px;
+        }
+        #startButton:hover {
+            background-color: #00bfa5;
+        }
+        #startButton:active {
+            transform: scale(0.98);
+        }
+        #startButton:disabled {
+            background-color: #555; /* Gris oscuro para deshabilitado */
+            color: #aaa;
+            cursor: not-allowed;
+        }
+        .instructions {
+            font-size: 14px;
+            color: #aaa;
+            margin-top: 15px;
+            text-align: center;
+        }
+        .footer-text {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            font-size: 10px;
+            color: #777;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+        }
+    </style>
+</head>
+<body>
+    <div class="visualizer-container">
+        <canvas id="voiceVisualizer"></canvas>
+    </div>
+    <button id="startButton">Iniciar Magia Vocal</button>
+    <p class="instructions">Permite el acceso al micrófono.<br>Observa cómo las partículas danzan y cambian con tu voz.</p>
+
+    <div class="footer-text">AURORA VOCALIS</div>
+
+    <script is:inline>
+        const canvas = document.getElementById('voiceVisualizer');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const visualizerContainer = document.querySelector('.visualizer-container');
+
+        canvas.width = visualizerContainer.offsetWidth;
+        canvas.height = visualizerContainer.offsetHeight;
+
+        let audioContext;
+        let analyser;
+        let dataArray;
+        let animationFrameId;
+
+        let canvasWidth = canvas.width;
+        let canvasHeight = canvas.height;
+        let centerX = canvasWidth / 2;
+        let centerY = canvasHeight / 2;
+
+        const numVirtualLines = 5;
+        const particlesPerLine = 80; // Puedes jugar con esto para densidad
+        const totalParticles = numVirtualLines * particlesPerLine;
+        
+        let baseRadius = Math.min(canvasWidth, canvasHeight) * 0.26; // Un pelín más grande el radio base
+        const baseParticleSize = 1.3; 
+        
+        // --- Colores Dinámicos ---
+        const baseParticleColor = { r: 224, g: 224, b: 224 }; // #e0e0e0
+        const activeParticleColor = { r: 0, g: 230, b: 230 };   // Un cyan/azul eléctrico vibrante
+                                                              // Prueba otros: Magenta {r: 255, g: 0, b: 255}, Naranja {r:255, g:120, b:0}
+
+        const easeFactor = 0.08; 
+
+        const staticDeformParams = [
+            { freq: 3.5, amp: 3.8, speed: 0.00065 }, // Ligeros ajustes
+            { freq: 5.8, amp: 3.2, speed: 0.00045 }
+        ];
+        const volumeDeformParams = [
+            { freq: 4.0, amp: 35, speed: 0.00095 }, // Aumentamos un poco la amplitud para más impacto radial
+            { freq: 7.2, amp: 28, speed: 0.00075 }
+        ];
+        
+        const lineSpacingVariation = 2.5;
+
+        let particles = [];
+        let smoothedVolume = 0;
+        const smoothingFactor = 0.11; // Un poco menos que 0.12 para suavizar un pelín más la respuesta global
+
+        let time = 0;
+
+        const ROTATION_ENABLED = true;
+        const angularAccelerationEase = 0.015;
+        
+        const baseMaxTargetAngularAcceleration = 0.000018; 
+        const baseMaxAngularVelocity = 0.0035;          
+        const baseAngularDamping = 0.985;
+
+        const volumeMultiplierForAngularAcceleration = 16.0; // Aún más impacto
+        const volumeMultiplierForMaxAngularVelocity = 12.0;  
+
+        const minTimeForAccelerationChange = 180; 
+        const randomTimeForAccelerationChange = 350;
+
+        // --- Función para interpolar colores ---
+        function lerpColor(color1, color2, factor) {
+            factor = Math.max(0, Math.min(1, factor)); // Clamp factor between 0 and 1
+            const r = Math.round(color1.r + factor * (color2.r - color1.r));
+            const g = Math.round(color1.g + factor * (color2.g - color1.g));
+            const b = Math.round(color1.b + factor * (color2.b - color1.b));
+            return `rgb(${r},${g},${b})`;
+        }
+
+
+        function createParticle(index) {
+            const virtualLineIndex = Math.floor(index / particlesPerLine);
+            const angle = (index % particlesPerLine / particlesPerLine) * Math.PI * 2;
+            const radiusOffsetForLine = (virtualLineIndex - (numVirtualLines -1) / 2) * lineSpacingVariation;
+            const reactivity = 0.6 + Math.random() * 1.2; // Rango [0.6, 1.8), para más variación
+
+            return {
+                id: index,
+                x: centerX + (Math.random() - 0.5) * 50,
+                y: centerY + (Math.random() - 0.5) * 50,
+                targetX: centerX, 
+                targetY: centerY,
+                baseAngle: angle,
+                virtualLineIndex: virtualLineIndex,
+                radiusOffset: radiusOffsetForLine,
+                phaseSeed: Math.random() * Math.PI * 2,
+                reactivityFactor: reactivity, 
+                currentAngleOffset: (Math.random() - 0.5) * 0.1,
+                angularVelocity: (Math.random() - 0.5) * 0.0005,
+                angularAcceleration: 0,
+                targetAngularAcceleration: (Math.random() - 0.5) * 2 * baseMaxTargetAngularAcceleration * 0.5,
+                timeToChangeAccelerationTarget: time + minTimeForAccelerationChange + Math.floor(Math.random() * randomTimeForAccelerationChange)
+            };
+        }
+
+        function initParticles() {
+            particles = [];
+            for (let i = 0; i < totalParticles; i++) {
+                particles.push(createParticle(i));
+            }
+        }
+
+        function setupAudioNodes() {
+             return new Promise((resolve, reject) => {
+                navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+                    .then((stream) => {
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        analyser = audioContext.createAnalyser();
+                        const microphone = audioContext.createMediaStreamSource(stream);
+                        
+                        analyser.fftSize = 256; 
+                        analyser.smoothingTimeConstant = 0.5; 
+                        const bufferLength = analyser.frequencyBinCount;
+                        dataArray = new Uint8Array(bufferLength);
+
+                        microphone.connect(analyser);
+                        resolve();
+                    })
+                    .catch((err) => {
+                        console.error("Error al acceder al micrófono:", err);
+                        alert("No se pudo acceder al micrófono. Asegúrate de permitir el acceso.");
+                        startButton.textContent = 'Error de Micrófono';
+                        startButton.disabled = false;
+                        reject(err);
+                    });
+            });
+        }
+
+        function updateAndDrawParticles(currentSmoothedVolume) {
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+            
+            // Factor de volumen global para modular efectos, limitado para no exagerar
+            const globalVolumeFactor = Math.max(0, Math.min(currentSmoothedVolume, 1.0)); 
+
+            particles.forEach(p => {
+                const particleReactivity = p.reactivityFactor;
+
+                // --- Rotación Dinámica ---
+                const dynamicMaxTargetAngularAcceleration = baseMaxTargetAngularAcceleration * (1 + globalVolumeFactor * volumeMultiplierForAngularAcceleration * particleReactivity);
+                const dynamicMaxAngularVelocity = baseMaxAngularVelocity * (1 + globalVolumeFactor * volumeMultiplierForMaxAngularVelocity * particleReactivity);
+
+                let particleAngle = p.baseAngle;
+                if (ROTATION_ENABLED) {
+                    if (time >= p.timeToChangeAccelerationTarget) {
+                        p.targetAngularAcceleration = (Math.random() - 0.5) * 2 * dynamicMaxTargetAngularAcceleration;
+                        p.timeToChangeAccelerationTarget = time + minTimeForAccelerationChange + Math.floor(Math.random() * randomTimeForAccelerationChange);
+                    }
+                    p.angularAcceleration += (p.targetAngularAcceleration - p.angularAcceleration) * angularAccelerationEase;
+                    p.angularVelocity += p.angularAcceleration;
+                    p.angularVelocity *= baseAngularDamping;
+                    p.angularVelocity = Math.max(-dynamicMaxAngularVelocity, Math.min(dynamicMaxAngularVelocity, p.angularVelocity));
+                    p.currentAngleOffset += p.angularVelocity;
+                    particleAngle += p.currentAngleOffset;
+                }
+                
+                // --- Deformación Radial ---
+                const cosA = Math.cos(particleAngle);
+                const sinA = Math.sin(particleAngle);
+                let radiusDeformation = 0;
+                staticDeformParams.forEach((param, idx) => {
+                    const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.7) + time * param.speed;
+                    radiusDeformation += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                });
+
+                let volumeSpecificDeformationAmount = 0;
+                if (currentSmoothedVolume > 0.015) { // Umbral un poco más bajo para deformación radial
+                    volumeDeformParams.forEach((param, idx) => {
+                        const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.9) + time * param.speed * (1 + currentSmoothedVolume * 0.9); // velocidad del patrón de deformación más sensible al volumen
+                        volumeSpecificDeformationAmount += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                    });
+                    radiusDeformation += currentSmoothedVolume * volumeSpecificDeformationAmount * particleReactivity;
+                }
+                
+                const currentParticleBaseRadius = baseRadius + p.radiusOffset;
+                const targetRadius = currentParticleBaseRadius + radiusDeformation;
+                
+                p.targetX = centerX + targetRadius * cosA;
+                p.targetY = centerY + targetRadius * sinA;
+
+                p.x += (p.targetX - p.x) * easeFactor;
+                p.y += (p.targetY - p.y) * easeFactor;
+
+                // --- Color y Tamaño Dinámico ---
+                // Calcular intensidad de color/tamaño para ESTA partícula
+                // Combina el volumen global con la reactividad de la partícula
+                // y un pequeño factor aleatorio de la partícula para más variedad.
+                const particleIntensity = Math.min(1.0, globalVolumeFactor * (0.5 + particleReactivity * 0.5) + (p.phaseSeed % 0.2)); // phaseSeed da un pequeño brillo base aleatorio
+                
+                ctx.fillStyle = lerpColor(baseParticleColor, activeParticleColor, particleIntensity);
+                
+                // Opcional: Tamaño dinámico
+                const particleSize = baseParticleSize * (1 + particleIntensity * 0.6); // Aumenta hasta un 60%
+
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, particleSize, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function animate() {
+            if (!audioContext) {
+                updateAndDrawParticles(0); 
+                animationFrameId = requestAnimationFrame(animate);
+                time++;
+                return;
+            }
+             if (!analyser || audioContext.state === 'suspended') {
+                 animationFrameId = requestAnimationFrame(animate);
+                 smoothedVolume = Math.max(0, smoothedVolume * 0.965); // Decaimiento un poco más lento para que el color/tamaño se apague gradualmente
+                 updateAndDrawParticles(smoothedVolume); 
+                 time++;
+                 return;
+            }
+
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            const relevantBins = Math.floor(dataArray.length * 0.33); // Enfocarse aún más en frecuencias bajas/medias
+            for (let i = 0; i < relevantBins; i++) {
+                sum += dataArray[i];
+            }
+            let averageVolume = relevantBins > 0 ? sum / relevantBins : 0;
+            
+            let normalizedVolume = Math.min(averageVolume / 128, 1.8); // Permitir un poco más de rango en normalización
+            normalizedVolume = Math.pow(normalizedVolume, 0.75); // Aún más sensible a bajos
+            normalizedVolume = Math.max(0, normalizedVolume);
+
+            smoothedVolume = smoothedVolume * (1 - smoothingFactor) + normalizedVolume * smoothingFactor;
+            smoothedVolume = Math.min(smoothedVolume, 1.8); // Limitar smoothedVolume para controlar efectos
+            
+            updateAndDrawParticles(smoothedVolume);
+            
+            time++;
+            animationFrameId = requestAnimationFrame(animate);
+        }
+        
+        startButton.addEventListener('click', () => {
+            if (audioContext && audioContext.state === 'running') {
+                 audioContext.suspend().then(() => {
+                    startButton.textContent = 'Reanudar Magia';
+                    startButton.style.backgroundColor = "#03DAC6"; // Color original
+                    startButton.style.color = "#121212";
+                });
+            } else if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    startButton.textContent = 'Magia Activa';
+                    startButton.style.backgroundColor = "#CF6679"; // Un color "activo" diferente
+                    startButton.style.color = "#121212";
+                });
+            } else if (!audioContext) {
+                startButton.disabled = true;
+                startButton.textContent = 'Invocando...';
+                initParticles(); 
+                setupAudioNodes()
+                    .then(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId); 
+                        time = 0; 
+                        smoothedVolume = 0; 
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.textContent = 'Magia Activa';
+                        startButton.style.backgroundColor = "#CF6679"; // Color "activo"
+                         startButton.style.color = "#121212";
+                        startButton.disabled = false;
+                    })
+                    .catch(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                        initParticles(); 
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.disabled = false; 
+                    });
+            }
+        });
+
+        initParticles();
+        animationFrameId = requestAnimationFrame(animate);
+
+        window.addEventListener('resize', () => {
+            canvas.width = visualizerContainer.offsetWidth;
+            canvas.height = visualizerContainer.offsetHeight;
+            canvasWidth = canvas.width;
+            canvasHeight = canvas.height;
+            centerX = canvasWidth / 2;
+            centerY = canvasHeight / 2;
+            baseRadius = Math.min(canvasWidth, canvasHeight) * 0.26;
+        });
+
+    </script>
+</body>
+</html>

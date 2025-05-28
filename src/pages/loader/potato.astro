@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizador de Voz Avanzado (Vanilla JS)</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #121212; /* Un negro un poco más suave */
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+        .visualizer-container {
+            width: 380px; /* Un poco más grande */
+            height: 380px;
+            position: relative;
+            margin-bottom: 25px;
+        }
+        #voiceVisualizer {
+            display: block;
+            background-color: transparent;
+        }
+        #startButton {
+            padding: 12px 25px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #03DAC6; /* Color de acento Material Design Teal */
+            color: #121212; /* Texto oscuro para contraste */
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s, transform 0.1s;
+            font-weight: 600; /* Un poco más de peso */
+        }
+        #startButton:hover {
+            background-color: #00b3a4;
+        }
+        #startButton:active {
+            transform: scale(0.98);
+        }
+        #startButton:disabled {
+            background-color: #555;
+            color: #999;
+            cursor: not-allowed;
+        }
+        .instructions {
+            font-size: 14px;
+            color: #aaa;
+            margin-top: 15px;
+            text-align: center;
+        }
+        .footer-text {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            font-size: 10px;
+            color: #777;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+        }
+    </style>
+</head>
+<body>
+    <div class="visualizer-container">
+        <canvas id="voiceVisualizer"></canvas>
+    </div>
+    <button id="startButton">Iniciar Reactor de Voz</button>
+    <p class="instructions">Permite el acceso al micrófono.<br>Las partículas reaccionarán dinámicamente a tu voz.</p>
+
+    <div class="footer-text">ADVANCED PARTICLE VOICE</div>
+
+    <script is:inline>
+        const canvas = document.getElementById('voiceVisualizer');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const visualizerContainer = document.querySelector('.visualizer-container');
+
+        canvas.width = visualizerContainer.offsetWidth;
+        canvas.height = visualizerContainer.offsetHeight;
+
+        let audioContext;
+        let analyser;
+        let dataArray;
+        let animationFrameId;
+
+        let canvasWidth = canvas.width;
+        let canvasHeight = canvas.height;
+        let centerX = canvasWidth / 2;
+        let centerY = canvasHeight / 2;
+        
+        // --- 10. Organización de Parámetros ---
+        const generalSettings = {
+            numVirtualLines: 5,
+            particlesPerLine: 85, // Un poco más de densidad
+            lineSpacingVariation: 2.3,
+            time: 0,
+        };
+        generalSettings.totalParticles = generalSettings.numVirtualLines * generalSettings.particlesPerLine;
+
+        const visualSettings = {
+            baseParticleSize: 1.2,
+            particleColor: '#e0e0e0',
+            // 1. Tamaño Dinámico
+            particleSizeVolumeMultiplier: 0.6, // Cuánto crece la partícula con el volumen
+            particleSizeReactivityMultiplier: 0.4, // Cuánto influye la reactividad en el tamaño
+            // 2. Brillo Dinámico
+            brightnessVolumeMultiplier: 0.5, // Aumento de brillo por volumen (0 a 1)
+            minBrightnessFactor: 0.8, // Mínimo brillo incluso con volumen (0.8 = 80% del original)
+            // 6. "Sacudida" Global
+            jitterThreshold: 0.95, // Umbral de smoothedVolume para activar sacudida
+            jitterMagnitude: 2.5,   // Píxeles de desplazamiento máximo
+            jitterDurationFrames: 7, // Cuántos frames dura la sacudida
+            isJittering: false,
+            jitterEndTime: 0,
+        };
+
+        const audioSettings = {
+            // 9. smoothingFactor para inmediatez y suavidad
+            smoothingFactor: 0.15, // Más rápido (antes 0.12)
+            analyserFFTSize: 256,
+            analyserSmoothingTimeConstant: 0.45, // Más reactivo (antes 0.5)
+            // 3. Curva de Sensibilidad
+            volumeNormalizationPower: 0.75, // Más sensible a bajos (antes 0.80)
+            maxNormalizedVolumeCap: 1.8, // Para smoothedVolume (antes 1.5)
+            // 5. Matiz por Frecuencia
+            lowFreqRangeEndBin: 4,   // Hasta ~750Hz para bajos/voz grave
+            highFreqRangeStartBin: 15, // Desde ~2.8kHz para agudos
+            highFreqRangeEndBin: 50,
+            lowFreqBoostFactor: 1.15, // Multiplicador para deformación radial con bajos
+            highFreqBoostFactor: 1.2, // Multiplicador para rotación con agudos
+            dominantFrequencyFactor: 0, // -1 para bajos, 1 para altos, 0 neutro
+        };
+
+        const motionSettings = {
+            easeFactor: 0.09, // Un poco más rápido para el target radial
+            baseRadius: Math.min(canvasWidth, canvasHeight) * 0.26,
+            staticDeformParams: [
+                { freq: 3.2, amp: 3.0, speed: 0.00055 },
+                { freq: 6.0, amp: 2.8, speed: 0.00038 }
+            ],
+            volumeDeformParams_BaseAmp: [ // Guardamos las amplitudes base
+                { freq: 4.0, amp: 32, speed: 0.00095 },
+                { freq: 7.2, amp: 28, speed: 0.00075 }
+            ],
+        };
+
+        const rotationSettings = {
+            enabled: true,
+            angularAccelerationEase: 0.018, // Un poco más responsivo
+            baseMaxTargetAngularAcceleration: 0.000010, // Muy sutil en reposo
+            baseMaxAngularVelocity: 0.0025,
+            // 7. Amortiguación Angular Adaptativa
+            baseAngularDamping: 0.988, // Damping base
+            volumeDampingReduction: 0.015, // Cuánto se reduce el damping (se acerca a 1) con volumen
+            
+            // Multiplicadores por volumen para efecto dramático
+            volumeMultiplierForAngularAcceleration: 20.0, // Muy alto (antes 15.0)
+            volumeMultiplierForMaxAngularVelocity: 15.0,  // Muy alto (antes 10.0)
+            
+            // 4. "Estallido" Rotacional Inicial
+            burstAngularAccelerationMultiplier: 2.5, // Multiplicador extra para el target acc. en "burst"
+            burstDurationFrames: 15, // Cuántos frames dura el burst
+            
+            minTimeForAccelerationChange: 200,
+            randomTimeForAccelerationChange: 400,
+        };
+
+        let particles = [];
+        let smoothedVolume = 0;
+        let lastNormalizedVolume = 0; // Para detectar "estallidos"
+
+        function createParticle(index) {
+            const virtualLineIndex = Math.floor(index / generalSettings.particlesPerLine);
+            const angle = (index % generalSettings.particlesPerLine / generalSettings.particlesPerLine) * Math.PI * 2;
+            const radiusOffsetForLine = (virtualLineIndex - (generalSettings.numVirtualLines -1) / 2) * generalSettings.lineSpacingVariation;
+
+            // 8. Rango de reactivityFactor Más Extremo
+            const reactivity = 0.5 + Math.random() * 1.5; // Rango [0.5, 2.0)
+
+            return {
+                id: index,
+                x: centerX + (Math.random() - 0.5) * 50,
+                y: centerY + (Math.random() - 0.5) * 50,
+                targetX: centerX, 
+                targetY: centerY,
+                baseAngle: angle,
+                virtualLineIndex: virtualLineIndex,
+                radiusOffset: radiusOffsetForLine,
+                phaseSeed: Math.random() * Math.PI * 2,
+                reactivityFactor: reactivity,
+                currentAngleOffset: (Math.random() - 0.5) * 0.1,
+                angularVelocity: (Math.random() - 0.5) * 0.0005,
+                angularAcceleration: 0,
+                targetAngularAcceleration: (Math.random() - 0.5) * 2 * rotationSettings.baseMaxTargetAngularAcceleration * 0.5,
+                timeToChangeAccelerationTarget: generalSettings.time + rotationSettings.minTimeForAccelerationChange + Math.floor(Math.random() * rotationSettings.randomTimeForAccelerationChange),
+                isInBurst: false,
+                burstEndTime: 0,
+            };
+        }
+        
+        function initParticles() {
+            particles = [];
+            for (let i = 0; i < generalSettings.totalParticles; i++) {
+                particles.push(createParticle(i));
+            }
+        }
+
+        function setupAudioNodes() {
+             return new Promise((resolve, reject) => {
+                navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+                    .then((stream) => {
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        analyser = audioContext.createAnalyser();
+                        const microphone = audioContext.createMediaStreamSource(stream);
+                        
+                        analyser.fftSize = audioSettings.analyserFFTSize; 
+                        analyser.smoothingTimeConstant = audioSettings.analyserSmoothingTimeConstant; 
+                        const bufferLength = analyser.frequencyBinCount;
+                        dataArray = new Uint8Array(bufferLength);
+
+                        microphone.connect(analyser);
+                        resolve();
+                    })
+                    .catch((err) => {
+                        console.error("Error al acceder al micrófono:", err);
+                        alert("No se pudo acceder al micrófono.");
+                        startButton.textContent = 'Error de Micrófono';
+                        startButton.disabled = false;
+                        reject(err);
+                    });
+            });
+        }
+
+        function updateAndDrawParticles(currentSmoothedVolume, p_dominantFrequencyFactor) {
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+            
+            const volumeFactor = Math.max(0, Math.min(currentSmoothedVolume, 1.0));
+
+            // 6. Aplicar Jitter
+            let jitterX = 0, jitterY = 0;
+            if (visualSettings.isJittering) {
+                if (generalSettings.time < visualSettings.jitterEndTime) {
+                    jitterX = (Math.random() - 0.5) * 2 * visualSettings.jitterMagnitude;
+                    jitterY = (Math.random() - 0.5) * 2 * visualSettings.jitterMagnitude;
+                } else {
+                    visualSettings.isJittering = false;
+                }
+            }
+
+            particles.forEach(p => {
+                const particleReactivity = p.reactivityFactor;
+
+                // --- Rotación ---
+                let particleAngle = p.baseAngle;
+                if (rotationSettings.enabled) {
+                    let currentMaxTargetAcc = rotationSettings.baseMaxTargetAngularAcceleration * (1 + volumeFactor * rotationSettings.volumeMultiplierForAngularAcceleration * particleReactivity);
+                    let currentMaxAngVel = rotationSettings.baseMaxAngularVelocity * (1 + volumeFactor * rotationSettings.volumeMultiplierForMaxAngularVelocity * particleReactivity);
+
+                    // 5. Matiz por Frecuencia para rotación
+                    if (p_dominantFrequencyFactor > 0) { // Más agudos
+                        currentMaxTargetAcc *= (1 + (p_dominantFrequencyFactor * (audioSettings.highFreqBoostFactor -1)) );
+                        currentMaxAngVel *= (1 + (p_dominantFrequencyFactor * (audioSettings.highFreqBoostFactor -1)) );
+                    }
+                    
+                    // 4. "Estallido" Rotacional
+                    if (p.isInBurst) {
+                        if (generalSettings.time < p.burstEndTime) {
+                            currentMaxTargetAcc *= rotationSettings.burstAngularAccelerationMultiplier;
+                        } else {
+                            p.isInBurst = false;
+                        }
+                    }
+
+                    if (generalSettings.time >= p.timeToChangeAccelerationTarget && !p.isInBurst) { // No cambiar objetivo base durante burst
+                        p.targetAngularAcceleration = (Math.random() - 0.5) * 2 * currentMaxTargetAcc;
+                        p.timeToChangeAccelerationTarget = generalSettings.time + rotationSettings.minTimeForAccelerationChange + Math.floor(Math.random() * rotationSettings.randomTimeForAccelerationChange);
+                    } else if (p.isInBurst) { // Forzar target durante burst
+                         p.targetAngularAcceleration = (Math.random() > 0.5 ? 1 : -1) * currentMaxTargetAcc; // Dirección aleatoria pero fuerte
+                    }
+
+
+                    p.angularAcceleration += (p.targetAngularAcceleration - p.angularAcceleration) * rotationSettings.angularAccelerationEase;
+                    p.angularVelocity += p.angularAcceleration;
+                    
+                    // 7. Amortiguación Angular Adaptativa
+                    const dynamicAngularDamping = rotationSettings.baseAngularDamping * (1 - volumeFactor * rotationSettings.volumeDampingReduction * 0.1); // Reducir efecto
+                    p.angularVelocity *= Math.max(0.95, Math.min(0.999, dynamicAngularDamping)); // Limitar damping
+
+                    p.angularVelocity = Math.max(-currentMaxAngVel, Math.min(currentMaxAngVel, p.angularVelocity));
+                    
+                    p.currentAngleOffset += p.angularVelocity;
+                    particleAngle += p.currentAngleOffset;
+                }
+                
+                const cosA = Math.cos(particleAngle);
+                const sinA = Math.sin(particleAngle);
+
+                // --- Deformación Radial ---
+                let radiusDeformation = 0;
+                motionSettings.staticDeformParams.forEach((param, idx) => {
+                    const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.7) + generalSettings.time * param.speed;
+                    radiusDeformation += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * param.amp;
+                });
+
+                let volumeSpecificDeformationAmount = 0;
+                if (currentSmoothedVolume > 0.015) {
+                    motionSettings.volumeDeformParams_BaseAmp.forEach((param, idx) => {
+                        let currentAmp = param.amp;
+                        // 5. Matiz por Frecuencia para deformación radial
+                        if (p_dominantFrequencyFactor < 0) { // Más bajos
+                           currentAmp *= (1 + (Math.abs(p_dominantFrequencyFactor) * (audioSettings.lowFreqBoostFactor -1)) );
+                        }
+
+                        const phase = p.phaseSeed + p.virtualLineIndex * (idx + 0.9) + generalSettings.time * param.speed * (1 + currentSmoothedVolume * 0.8);
+                        volumeSpecificDeformationAmount += (idx % 2 === 0 ? Math.sin(particleAngle * param.freq + phase) : Math.cos(particleAngle * param.freq + phase)) * currentAmp;
+                    });
+                    radiusDeformation += currentSmoothedVolume * volumeSpecificDeformationAmount * particleReactivity;
+                }
+                
+                const currentParticleBaseRadius = motionSettings.baseRadius + p.radiusOffset;
+                const targetRadius = currentParticleBaseRadius + radiusDeformation;
+                
+                p.targetX = centerX + targetRadius * cosA + jitterX;
+                p.targetY = centerY + targetRadius * sinA + jitterY;
+
+                p.x += (p.targetX - p.x) * motionSettings.easeFactor;
+                p.y += (p.targetY - p.y) * motionSettings.easeFactor;
+
+                // --- Apariencia de Partícula ---
+                // 1. Tamaño Dinámico
+                let currentParticleSize = visualSettings.baseParticleSize * (1 + volumeFactor * visualSettings.particleSizeVolumeMultiplier * (particleReactivity - 0.5) * visualSettings.particleSizeReactivityMultiplier);
+                currentParticleSize = Math.max(0.5, currentParticleSize); // Tamaño mínimo
+
+                // 2. Brillo Dinámico
+                const baseColorRGB = [224, 224, 224]; // #e0e0e0
+                let brightness = visualSettings.minBrightnessFactor + (volumeFactor * visualSettings.brightnessVolumeMultiplier * (particleReactivity / 1.5)); // Dividir por ~max reactivity
+                brightness = Math.min(1.5, Math.max(visualSettings.minBrightnessFactor, brightness)); // Limitar brillo
+
+                ctx.fillStyle = `rgb(${Math.floor(baseColorRGB[0] * brightness)}, ${Math.floor(baseColorRGB[1] * brightness)}, ${Math.floor(baseColorRGB[2] * brightness)})`;
+                
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, currentParticleSize, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function animate() {
+            let p_dominantFrequencyFactor = 0;
+
+            if (!audioContext) {
+                updateAndDrawParticles(0, p_dominantFrequencyFactor); 
+                animationFrameId = requestAnimationFrame(animate);
+                generalSettings.time++;
+                return;
+            }
+             if (!analyser || audioContext.state === 'suspended') {
+                 animationFrameId = requestAnimationFrame(animate);
+                 smoothedVolume = Math.max(0, smoothedVolume * 0.965); 
+                 updateAndDrawParticles(smoothedVolume, p_dominantFrequencyFactor); 
+                 generalSettings.time++;
+                 return;
+            }
+
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            let lowFreqSum = 0;
+            let highFreqSum = 0;
+
+            // Suma para volumen general
+            const relevantBins = Math.floor(dataArray.length * 0.4); // Un poco más de bins
+            for (let i = 0; i < relevantBins; i++) {
+                sum += dataArray[i];
+            }
+            // Suma para frecuencias (5)
+            for(let i = 0; i < dataArray.length; i++) {
+                if (i <= audioSettings.lowFreqRangeEndBin) {
+                    lowFreqSum += dataArray[i];
+                }
+                if (i >= audioSettings.highFreqRangeStartBin && i <= audioSettings.highFreqRangeEndBin) {
+                    highFreqSum += dataArray[i];
+                }
+            }
+            const avgLowFreq = lowFreqSum / (audioSettings.lowFreqRangeEndBin + 1);
+            const avgHighFreq = highFreqSum / (audioSettings.highFreqRangeEndBin - audioSettings.highFreqRangeStartBin + 1);
+
+            if (avgLowFreq > avgHighFreq * 1.5 && avgLowFreq > 30) { // Si bajos son significativamente más fuertes
+                p_dominantFrequencyFactor = - (avgLowFreq / 128); // Valor negativo
+            } else if (avgHighFreq > avgLowFreq * 1.5 && avgHighFreq > 20) { // Si altos son significativamente más fuertes
+                p_dominantFrequencyFactor = (avgHighFreq / 128); // Valor positivo
+            }
+            p_dominantFrequencyFactor = Math.max(-1, Math.min(1, p_dominantFrequencyFactor));
+
+
+            let averageVolume = relevantBins > 0 ? sum / relevantBins : 0;
+            
+            let normalizedVolume = Math.min(averageVolume / 128, 1.8); // Cap un poco más alto
+            normalizedVolume = Math.pow(normalizedVolume, audioSettings.volumeNormalizationPower); 
+            normalizedVolume = Math.max(0, normalizedVolume);
+
+            // 4. Detección de "Estallido" Rotacional
+            const volumeDelta = normalizedVolume - lastNormalizedVolume;
+            if (volumeDelta > 0.35 && normalizedVolume > 0.4) { // Si hay un aumento rápido y significativo
+                particles.forEach(p => {
+                    if(p.reactivityFactor > 1.0) { // Solo partículas más reactivas entran en burst
+                        p.isInBurst = true;
+                        p.burstEndTime = generalSettings.time + rotationSettings.burstDurationFrames;
+                    }
+                });
+            }
+            lastNormalizedVolume = normalizedVolume;
+
+
+            smoothedVolume = smoothedVolume * (1 - audioSettings.smoothingFactor) + normalizedVolume * audioSettings.smoothingFactor;
+            smoothedVolume = Math.min(smoothedVolume, audioSettings.maxNormalizedVolumeCap); 
+            
+            // 6. Detección de "Sacudida"
+            if (smoothedVolume > visualSettings.jitterThreshold && !visualSettings.isJittering) {
+                visualSettings.isJittering = true;
+                visualSettings.jitterEndTime = generalSettings.time + visualSettings.jitterDurationFrames;
+            }
+            
+            updateAndDrawParticles(smoothedVolume, p_dominantFrequencyFactor);
+            
+            generalSettings.time++;
+            animationFrameId = requestAnimationFrame(animate);
+        }
+        
+        startButton.addEventListener('click', () => {
+            // ... (lógica del botón sin cambios significativos, solo asegurando reinicios)
+            if (audioContext && audioContext.state === 'running') {
+                 audioContext.suspend().then(() => {
+                    startButton.textContent = 'Reanudar Reactor';
+                    startButton.style.backgroundColor = "#03DAC6"; // Teal
+                    startButton.style.color = "#121212";
+                });
+            } else if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    startButton.textContent = 'Reactor Activo';
+                    startButton.style.backgroundColor = "#CF6679"; // Error/Stop color Material
+                    startButton.style.color = "#121212";
+                });
+            } else if (!audioContext) {
+                startButton.disabled = true;
+                startButton.textContent = 'Iniciando...';
+                initParticles(); 
+                setupAudioNodes()
+                    .then(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId); 
+                        generalSettings.time = 0; 
+                        smoothedVolume = 0; 
+                        lastNormalizedVolume = 0;
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.textContent = 'Reactor Activo';
+                        startButton.style.backgroundColor = "#CF6679"; // Error/Stop color
+                        startButton.style.color = "#121212";
+                        startButton.disabled = false;
+                    })
+                    .catch(() => {
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                        initParticles(); 
+                        animationFrameId = requestAnimationFrame(animate); 
+                        startButton.disabled = false; 
+                        startButton.textContent = 'Error Micrófono';
+                    });
+            }
+        });
+
+        initParticles();
+        animationFrameId = requestAnimationFrame(animate);
+
+        window.addEventListener('resize', () => {
+            // ... (lógica de resize sin cambios, solo usando motionSettings.baseRadius)
+            canvas.width = visualizerContainer.offsetWidth;
+            canvas.height = visualizerContainer.offsetHeight;
+            
+            canvasWidth = canvas.width;
+            canvasHeight = canvas.height;
+            centerX = canvasWidth / 2;
+            centerY = canvasHeight / 2;
+            motionSettings.baseRadius = Math.min(canvasWidth, canvasHeight) * 0.26;
+        });
+
+    </script>
+</body>
+</html>
