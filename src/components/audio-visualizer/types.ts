@@ -1,21 +1,65 @@
 // src/components/audio-visualizer/types.ts
 
+// Simple Vec2 class (could be in a separate file or defined here)
+export class Vec2 {
+  constructor(public x: number = 0, public y: number = 0) {}
+
+  add(v: Vec2): Vec2 {
+    return new Vec2(this.x + v.x, this.y + v.y);
+  }
+  sub(v: Vec2): Vec2 {
+    return new Vec2(this.x - v.x, this.y - v.y);
+  }
+  mult(s: number): Vec2 {
+    return new Vec2(this.x * s, this.y * s);
+  }
+  div(s: number): Vec2 {
+    return s !== 0 ? new Vec2(this.x / s, this.y / s) : new Vec2(0, 0);
+  }
+  mag(): number {
+    return Math.sqrt(this.x * this.x + this.y * this.y);
+  }
+  normalize(): Vec2 {
+    const m = this.mag();
+    return m > 0 ? this.div(m) : new Vec2();
+  }
+  dist(v: Vec2): number {
+    return this.sub(v).mag();
+  }
+  copy(): Vec2 {
+    return new Vec2(this.x, this.y);
+  }
+  static fromAngle(angle: number, length: number = 1): Vec2 {
+    return new Vec2(length * Math.cos(angle), length * Math.sin(angle));
+  }
+}
+
 export interface Particle {
   id: number;
-  x: number;
-  y: number;
-  targetX: number;
-  targetY: number;
+  // Usamos Vec2 para posición y posición objetivo
+  position: Vec2;
+  targetPosition: Vec2;
+
   baseAngle: number;
   virtualLineIndex: number;
   radiusOffset: number;
+  // phaseSeed ahora influenciado por ruido, pero sigue siendo un factor
   phaseSeed: number;
-  reactivityFactor: number;
+  reactivityFactor: number; // La reactividad puede afectar tamaño, rotación, deformación...
+
+  // Propiedades de rotación
   currentAngleOffset: number;
   angularVelocity: number;
   angularAcceleration: number;
   targetAngularAcceleration: number;
   timeToChangeAccelerationTarget: number;
+
+  // Propiedades de Tamaño (Nuevas)
+  currentSize: number;
+  targetSize: number;
+
+  // Control de reactividad al volumen
+  isVolumeReactive: boolean; // Indica si la partícula debe reaccionar al volumen
 }
 
 export type AudioSourceType = "microphone" | "file";
@@ -52,31 +96,34 @@ export interface VisualizerViewProps {
   smoothedVolume: number;
   width: number;
   height: number;
-  particleColor?: string;
-  baseParticleSize?: number;
-  // Añade aquí más props para personalizar la apariencia si es necesario
-  // Por ejemplo, las constantes de deformación, número de partículas, etc.
-  numVirtualLines?: number;
-  particlesPerLine?: number;
-  easeFactor?: number;
-  lineSpacingVariation?: number;
-  // ... y otros parámetros visuales del script original
-  config: VisualizerConfig; // Agrupamos los parámetros de configuración visual
+  // Agrupamos los parámetros de configuración visual
+  config: VisualizerConfig;
 }
 
 export interface VisualizerConfig {
   particleColor: string;
-  baseParticleSize: number;
+  baseParticleSize: number; // This might become less relevant with min/max
+
   numVirtualLines: number;
   particlesPerLine: number;
-  easeFactor: number;
+  easeFactor: number; // Easing para la posición
   lineSpacingVariation: number;
-  baseRadiusFactor: number; // Factor para calcular baseRadius (e.g., 0.26 del script original)
+  baseRadiusFactor: number;
 
-  // Parámetros de deformación estática
+  // Parámetros de deformación estática (usando senos/cosenos)
   staticDeformParams: { freq: number; amp: number; speed: number }[];
-  // Parámetros de deformación por volumen
+  // Parámetros de deformación por volumen (usando senos/cosenos)
   volumeDeformParams: { freq: number; amp: number; speed: number }[];
+
+  // Parámetros de Deformación basados en Ruido
+  noiseDeformationParams: {
+    staticNoiseAmp: number;
+    staticNoiseScale: number;
+    staticNoiseSpeed: number;
+    volumeNoiseAmp: number;
+    volumeNoiseScale: number;
+    volumeNoiseSpeed: number;
+  }[];
 
   // Parámetros de Rotación
   ROTATION_ENABLED: boolean;
@@ -86,55 +133,101 @@ export interface VisualizerConfig {
   baseAngularDamping: number;
   volumeMultiplierForAngularAcceleration: number;
   volumeMultiplierForMaxAngularVelocity: number;
-  volumePowerForRotation: number;
+  volumePowerForRotation: number; // Potencia aplicada al volumen para la ROTACIÓN
   minTimeForAccelerationChange: number;
   randomTimeForAccelerationChange: number;
+  noiseRotationScale: number;
+  noiseRotationSpeed: number;
+  noiseRotationAmp: number;
 
-  // Variación de tamaño de partícula
-  minParticleSizeFactor: number;
-  particleSizeVelocityScale: number;
-  minParticleSize: number; // Tamaño mínimo absoluto de partícula
-  maxParticleSize: number; // Tamaño máximo absoluto de partícula
-  particleBlurFactor: number; // Factor de difuminado para partículas grandes
-  haloCount?: number; // Número de halos concéntricos
-  haloBaseAlpha?: number; // Opacidad base del halo más grande
+  // Variación de tamaño de partícula (Mejorada)
+  minParticleSizeFactor: number; // Maybe less useful now
+  particleSizeVelocityScale: number; // Aún puede usarse para reducir tamaño con velocidad
+  minParticleSize: number; // Tamaño mínimo absoluto
+  maxParticleSize: number; // Tamaño máximo absoluto
+
+  // Nuevos parámetros para el cálculo de tamaño según volumen y ruido
+  volumeSizePower: number; // Potencia aplicada al volumen para el TAMAÑO (más alto = más explosivo)
+  sizeEaseFactor: number; // Easing para el TAMAÑO (más bajo = cambio de tamaño más lento)
+  noiseSizeScale: number; // Escala espacial del ruido para el tamaño
+  noiseSizeSpeed: number; // Velocidad temporal del ruido para el tamaño
+  noiseSizeAmp: number; // Amplitud del ruido que modula el tamaño (afecta la variación relativa). 0 = sin modulación por ruido.
+
+  // Parámetros de apariencia (Halos/Blur)
+  particleBlurFactor: number; // Factor de difuminado (escalado de halos)
+  haloCount?: number;
+  haloBaseAlpha?: number;
+
+  // Control de reactividad al volumen
+  volumeReactivePercentage: number; // Porcentaje de partículas que reaccionan al volumen (0-1)
 }
 
 export const DEFAULT_VISUALIZER_CONFIG: VisualizerConfig = {
   particleColor: "#f0f0f0",
   numVirtualLines: 6,
   particlesPerLine: 90,
-  easeFactor: 0.09,
+  easeFactor: 0.09, // Easing para POSICION
   lineSpacingVariation: 2.2,
   baseRadiusFactor: 0.26,
   staticDeformParams: [
     { freq: 4.5, amp: 2.5, speed: 0.0005 },
     { freq: 7.2, amp: 2.0, speed: 0.0003 },
   ],
-  baseParticleSize: 1.2, // Tamaño base de cada partícula. SUBE para partículas más grandes, BAJA para más pequeñas.
+  baseParticleSize: 1.2, // Keep for backward compatibility/reference
+
   volumeDeformParams: [
-    // Estos parámetros hacen que la nube de partículas se expanda y deforme con el sonido.
-    // amp: SUBE para que la expansión/reacción al sonido sea mayor, BAJA para que sea más sutil.
-    // freq: Cambia la frecuencia del patrón de deformación (más alto = más ondulaciones).
-    // speed: Cambia la velocidad de la animación de la deformación.
-    { freq: 3.8, amp: 10, speed: 0.0011 }, // ← Cambia la expansión con el sonido (amp)
-    { freq: 6.5, amp: 2, speed: 0.0008 }, // ← Cambia la expansión con el sonido (amp)
+    { freq: 3.8, amp: 10, speed: 0.0011 },
+    { freq: 6.5, amp: 2, speed: 0.0008 },
   ],
+
+  noiseDeformationParams: [
+    {
+      staticNoiseAmp: 5,
+      staticNoiseScale: 0.008,
+      staticNoiseSpeed: 0.0002,
+      volumeNoiseAmp: 15,
+      volumeNoiseScale: 0.01,
+      volumeNoiseSpeed: 0.0005,
+    },
+    {
+      staticNoiseAmp: 1,
+      staticNoiseScale: 0.05,
+      staticNoiseSpeed: 0.0008,
+      volumeNoiseAmp: 3,
+      volumeNoiseScale: 0.08,
+      volumeNoiseSpeed: 0.001,
+    },
+  ],
+
   ROTATION_ENABLED: true,
-  angularAccelerationEase: 0.012, // Más bajo = reacciona más rápido a los cambios de aceleración
-  baseMaxTargetAngularAcceleration: 0.00001, // SUBE para que la aceleración base sea mayor (más movimiento incluso sin sonido).DEFAULT: 0.00001
-  baseMaxAngularVelocity: 0.002, // SUBE para que la velocidad máxima base sea mayor (más rápido en reposo).DEFAULT: 0.002
-  baseAngularDamping: 0.98, // SUBE para que la rotación se frene más rápido (más amortiguación), BAJA para que gire más tiempo.DEFAULT: 0.98
-  volumeMultiplierForAngularAcceleration: 10, // SUBE para que la aceleración angular aumente mucho con el sonido, BAJA para menos efecto. DEFAULT: 80.0
-  volumeMultiplierForMaxAngularVelocity: 23, // SUBE para que la velocidad máxima aumente mucho con el sonido, BAJA para menos efecto. DEFAULT: 45.0
-  volumePowerForRotation: 2.0, // SUBE para que el efecto de la voz sea más explosivo (no lineal), BAJA para que sea más suave. DEFAULT: 2.0
-  minTimeForAccelerationChange: 200, // DEFAULT: 200
-  randomTimeForAccelerationChange: 400, // DEFAULT: 400
-  minParticleSizeFactor: 0.4, // SUBE para que el tamaño mínimo de las partículas sea mayor (no se hagan tan pequeñas), BAJA para más variación. DEFAULT: 0.4
-  particleSizeVelocityScale: 0.7, // SUBE para que la velocidad afecte más el tamaño de las partículas, BAJA para menos efecto. DEFAULT: 0.7
-  minParticleSize: 0, // Valor por defecto sugerido
-  maxParticleSize: 3.2, // Valor por defecto sugerido
-  particleBlurFactor: 8, // Valor por defecto sugerido para el blur
-  haloCount: 3, // Valor por defecto para número de halos
-  haloBaseAlpha: 0.18, // Valor por defecto para opacidad base del halo
+  angularAccelerationEase: 0.012,
+  baseMaxTargetAngularAcceleration: 0.00001,
+  baseMaxAngularVelocity: 0.002,
+  baseAngularDamping: 0.98,
+  volumeMultiplierForAngularAcceleration: 80.0,
+  volumeMultiplierForMaxAngularVelocity: 45.0,
+  volumePowerForRotation: 2.0, // Potencia para ROTACION
+  minTimeForAccelerationChange: 200,
+  randomTimeForAccelerationChange: 400,
+  noiseRotationScale: 0.01,
+  noiseRotationSpeed: 0.0001,
+  noiseRotationAmp: 0.00003,
+
+  minParticleSizeFactor: 0.4, // Maybe less useful now
+  particleSizeVelocityScale: 0.7,
+  minParticleSize: 0.5,
+  maxParticleSize: 3.2,
+
+  // --- Nuevos parámetros de TAMAÑO ---
+  volumeSizePower: 3.0, // **Potencia alta para que el tamaño sea muy reactivo a picos de volumen**
+  sizeEaseFactor: 0.15, // **Easing para TAMAÑO** (más rápido que el de posición)
+  noiseSizeScale: 0.05, // Escala espacial del ruido que modula el tamaño. Más bajo = cambios suaves entre partículas.
+  noiseSizeSpeed: 0.001, // Velocidad temporal del ruido que modula el tamaño.
+  noiseSizeAmp: 0.5, // Amplitud del ruido que modula el tamaño (afecta la variación relativa). 0 = sin modulación por ruido.
+
+  particleBlurFactor: 8,
+  haloCount: 3,
+  haloBaseAlpha: 0.18,
+
+  volumeReactivePercentage: 0.1, // 10% de las partículas reaccionarán al volumen
 };
