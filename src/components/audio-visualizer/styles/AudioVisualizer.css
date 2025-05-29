@@ -1,0 +1,94 @@
+/* src/components/styles/AudioVisualizer.css */
+.audio-visualizer-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  /* background-color: #0c0c0c; */ /* El fondo se puede controlar desde la página contenedora */
+  color: #e0e0e0;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.visualizer-container {
+  width: 380px; /* O hacer esto configurable/responsivo */
+  height: 380px;
+  position: relative;
+  margin-bottom: 25px;
+  border: 1px solid #333; /* Opcional: para ver los límites */
+}
+
+.visualizer-canvas { /* Si necesitas un selector específico para el canvas */
+  display: block;
+  background-color: transparent;
+}
+
+.controls-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 15px;
+  margin-top: 20px;
+}
+
+.control-button {
+  padding: 14px 30px;
+  font-size: 17px;
+  cursor: pointer;
+  background-color: #6a0dad;
+  color: white;
+  border: none;
+  border-radius: 7px;
+  transition: background-color 0.3s, transform 0.1s;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  min-width: 200px; /* Para que los botones tengan un ancho similar */
+  text-align: center;
+}
+
+.control-button:hover:not(:disabled) {
+  background-color: #8a2be2;
+}
+
+.control-button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.control-button:disabled {
+  background-color: #555;
+  cursor: not-allowed;
+}
+
+.file-input-label {
+  padding: 12px 25px;
+  font-size: 16px;
+  cursor: pointer;
+  background-color: #3a3a70; /* Un color diferente para la carga de archivos */
+  color: white;
+  border: none;
+  border-radius: 7px;
+  transition: background-color 0.3s;
+  font-weight: 500;
+  display: inline-block; /* Para que el padding funcione bien */
+}
+
+.file-input-label:hover {
+  background-color: #4c4c94;
+}
+
+.file-input-hidden {
+  display: none;
+}
+
+.status-message {
+  font-size: 14px;
+  color: #999;
+  margin-top: 10px;
+  min-height: 20px; /* Para evitar saltos de layout */
+  text-align: center;
+}
+
+.error-message {
+  color: #ff6b6b; /* Un rojo para errores */
+  font-weight: bold;
+}
