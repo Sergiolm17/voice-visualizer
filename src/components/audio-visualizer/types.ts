@@ -44,8 +44,8 @@ export interface UseAudioVisualizerLogicReturn {
   ) => Promise<void>;
   togglePlayPause: () => void;
   stopAudio: () => void;
-  audioContext?: AudioContext; // Exponer para control avanzado si es necesario
-  analyser?: AnalyserNode; // Exponer para control avanzado si es necesario
+  audioContext?: AudioContext;
+  analyser?: AnalyserNode;
 }
 
 export interface VisualizerViewProps {

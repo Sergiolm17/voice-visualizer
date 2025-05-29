@@ -41,7 +41,7 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
   const mergedViewConfig = { ...DEFAULT_VISUALIZER_CONFIG, ...viewConfig };
 
   const handleInitialize = (source: AudioSourceType, file?: File) => {
-    setCurrentSourceType(source); // Actualiza el tipo de fuente actual
+    setCurrentSourceType(source);
     initializeAudio(source, file);
   };
 
@@ -68,14 +68,12 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
       if (currentSourceType === "microphone") {
         handleInitialize("microphone");
       } else if (currentSourceType === "file") {
-        // Si es tipo archivo y no hay audio, pedimos que seleccione uno
         fileInputRef.current?.click();
       }
     }
   };
 
   useEffect(() => {
-    // Limpiar el audio si el componente se desmonta
     return () => {
       stopAudio();
     };
@@ -104,7 +102,6 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
           {getButtonText()}
         </button>
 
-        {/* Botones para cambiar de fuente si no está activo */}
         {(audioState === "idle" || audioState === "error") && (
           <>
             <button
@@ -133,7 +130,7 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
               onChange={handleFileChange}
               onClick={(e) => {
                 (e.target as HTMLInputElement).value = "";
-              }} // Para permitir seleccionar el mismo archivo
+              }}
             />
           </>
         )}
@@ -145,10 +142,8 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
               className="control-button"
               onClick={() => {
                 stopAudio();
-                // Opcionalmente, resetear el tipo de fuente aquí si se desea
-                // setCurrentSourceType('microphone');
               }}
-              style={{ backgroundColor: "#d9534f" }} // Un color rojo para detener
+              style={{ backgroundColor: "#d9534f" }}
             >
               Detener y Cambiar Fuente
             </button>

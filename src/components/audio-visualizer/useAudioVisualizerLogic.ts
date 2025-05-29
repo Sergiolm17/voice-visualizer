@@ -21,13 +21,16 @@ export function useAudioVisualizerLogic(
   const [audioState, setAudioState] = useState<AudioProcessingState>("idle");
   const [smoothedVolume, setSmoothedVolume] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [currentSourceType, setCurrentSourceType] =
+    useState<AudioSourceType>("microphone");
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const sourceNodeRef = useRef<AudioNode | null>(null); // MediaStreamSource or AudioBufferSource
+  const sourceNodeRef = useRef<AudioNode | null>(null);
   const dataArrayRef = useRef<Uint8Array | null>(null);
   const animationFrameIdRef = useRef<number | null>(null);
-  const currentStreamRef = useRef<MediaStream | null>(null); // Para detener las pistas del micrófono
+  const currentStreamRef = useRef<MediaStream | null>(null);
+  const destinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
 
   const processAudio = useCallback(() => {
     if (
@@ -106,11 +109,12 @@ export function useAudioVisualizerLogic(
         audioContextRef.current &&
         audioContextRef.current.state !== "closed"
       ) {
-        await audioContextRef.current.close(); // Cierra el contexto anterior si existe
+        await audioContextRef.current.close();
       }
 
       setAudioState("initializing");
       setErrorMessage(null);
+      setCurrentSourceType(sourceType);
 
       try {
         const context = new (window.AudioContext ||
@@ -124,6 +128,10 @@ export function useAudioVisualizerLogic(
         dataArrayRef.current = new Uint8Array(bufferLength);
         analyserRef.current = analyser;
 
+        // Crear el nodo de destino
+        const destination = context.createMediaStreamDestination();
+        destinationRef.current = destination;
+
         if (sourceType === "microphone") {
           if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             throw new Error("getUserMedia not supported on your browser!");
@@ -132,14 +140,14 @@ export function useAudioVisualizerLogic(
             audio: true,
             video: false,
           });
-          currentStreamRef.current = stream; // Guardar para detener las pistas
+          currentStreamRef.current = stream;
           sourceNodeRef.current = context.createMediaStreamSource(stream);
         } else if (sourceType === "file" && audioFile) {
           const arrayBuffer = await audioFile.arrayBuffer();
           const audioBuffer = await context.decodeAudioData(arrayBuffer);
           const bufferSource = context.createBufferSource();
           bufferSource.buffer = audioBuffer;
-          bufferSource.loop = true; // Opcional: hacer que el archivo se repita
+          bufferSource.loop = true;
           sourceNodeRef.current = bufferSource;
           bufferSource.start();
         } else {
@@ -147,8 +155,10 @@ export function useAudioVisualizerLogic(
         }
 
         sourceNodeRef.current.connect(analyserRef.current);
-        // Conectamos el analizador al destino para escuchar el audio
-        analyserRef.current.connect(context.destination);
+        // Conectar el analizador al destino solo si es un archivo de audio
+        if (sourceType === "file") {
+          analyserRef.current.connect(context.destination);
+        }
 
         setAudioState("running");
         if (animationFrameIdRef.current)
@@ -160,7 +170,7 @@ export function useAudioVisualizerLogic(
           err instanceof Error ? err.message : "An unknown error occurred.";
         setErrorMessage(`Error al acceder a la fuente de audio: ${message}`);
         setAudioState("error");
-        stopAudio(); // Limpiar en caso de error
+        stopAudio();
       }
     },
     [
